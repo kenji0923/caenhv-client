@@ -19,6 +19,7 @@ labscript = ["blacs", "labscript", "labscript-utils", "h5py"]
 caenhv-client = "caenhv_client.app:main"
 
 [tool.setuptools]
+include-package-data = true
 packages = [
   "caenhv_client",
   "caenhv_client.gui",
@@ -36,3 +37,6 @@ packages = [
 "caenhv_client.labscript_integration" = "labscript_integration"
 "caenhv_client.labscript_integration.caenhv" = "labscript_integration/caenhv"
 
+[tool.setuptools.package-data]
+"caenhv_client.gui" = ["ui/*.ui"]
+"caenhv_client" = ["resources/*.svg"]

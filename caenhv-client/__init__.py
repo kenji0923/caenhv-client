@@ -1,4 +1,4 @@
-"""caenhv_client package."""
+"""caenhv-client package."""
 
 from .app import main
 

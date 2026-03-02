@@ -1,2 +1,1 @@
-"""Labscript integration namespace for caenhv_client."""
-
+"""Labscript integration namespace for caenhv-client."""
