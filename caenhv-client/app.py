@@ -12,6 +12,12 @@ except Exception:
 
 
 def main() -> int:
+    try:
+        from desktop_app import set_process_appid
+
+        set_process_appid("caenhv_client")
+    except Exception:
+        pass
     app = QtWidgets.QApplication(sys.argv)
     root_dir = Path(__file__).resolve().parents[1]
     icon_path = Path(__file__).resolve().parent / "resources" / "caenhv-client.svg"

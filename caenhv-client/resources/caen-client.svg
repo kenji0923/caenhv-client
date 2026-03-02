@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="512" height="512" version="1.1" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+ <rect width="512" height="512" fill="#f00" stroke="#f0f" stroke-linecap="square" stroke-width="2"/>
+ <path d="m1.2384 255.95v-254.71h509.41v509.41h-509.41z" fill="#bb2d27"/>
+ <g fill="#ffffff" font-family="Arial" font-size="96px" stroke-width="2">
+  <text x="13.9375" y="230.35938" text-align="center">C</text>
+  <text x="83.265625" y="230.35938" text-align="center">A</text>
+  <text x="147.29688" y="230.35938" text-align="center">E</text>
+  <text x="211.32812" y="230.35938" text-align="center">N</text>
+  <text x="360.67188" y="230.35938" text-align="center">H</text>
+  <text x="430" y="230.35938" text-align="center">V</text>
+  <text x="21.882812" y="350.35938" text-align="center">w</text>
+  <text x="91.210938" y="350.35938" text-align="center">/</text>
+  <text x="144.55469" y="350.35938" text-align="center">d</text>
+  <text x="197.94531" y="350.35938" text-align="center">e</text>
+  <text x="251.33594" y="350.35938" text-align="center">v</text>
+  <text x="299.33594" y="350.35938" text-align="center">m</text>
+  <text x="379.30469" y="350.35938" text-align="center">a</text>
+  <text x="432.69531" y="350.35938" text-align="center">n</text>
+ </g>
+</svg>

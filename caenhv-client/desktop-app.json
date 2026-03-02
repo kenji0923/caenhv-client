@@ -1,0 +1,10 @@
+{
+  "org_name": "kenji0923",
+  "modules": {
+    "caenhv_client": {
+      "display_name": "CAEN HV Client",
+      "icon": "resources/caenhv-client.svg"
+    }
+  }
+}
+

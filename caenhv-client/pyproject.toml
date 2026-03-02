@@ -9,6 +9,7 @@ description = "Standalone and BLACS-integrated client for CAEN HV via devman"
 requires-python = ">=3.10"
 dependencies = [
   "caenhv-devman-client>=0.1.0",
+  "desktop-app>=0.3",
 ]
 
 [project.optional-dependencies]
@@ -17,6 +18,10 @@ labscript = ["blacs", "labscript", "labscript-utils", "h5py"]
 
 [project.scripts]
 caenhv-client = "caenhv_client.app:main"
+caenhv_client = "desktop_app:entry_point"
+
+[project.gui-scripts]
+caenhv_client-gui = "desktop_app:entry_point"
 
 [tool.setuptools]
 include-package-data = true
@@ -39,4 +44,4 @@ packages = [
 
 [tool.setuptools.package-data]
 "caenhv_client.gui" = ["ui/*.ui"]
-"caenhv_client" = ["resources/*.svg"]
+"caenhv_client" = ["resources/*.svg", "desktop-app.json"]
