@@ -1,0 +1,3 @@
+[submodule "caenhv_devman"]
+	path = caenhv_devman
+	url = https://github.com/kenji0923/caenhv_devman.git
