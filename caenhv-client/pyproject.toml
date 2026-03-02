@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "caenhv-client"
+version = "0.1.0"
+description = "Standalone and BLACS-integrated client for CAEN HV via devman"
+requires-python = ">=3.10"
+dependencies = [
+  "caenhv-devman-client>=0.1.0",
+]
+
+[project.optional-dependencies]
+gui = ["PyQt5>=5.15"]
+labscript = ["blacs", "labscript", "labscript-utils", "h5py"]
+
+[project.scripts]
+caenhv-client = "caenhv_client.app:main"
+
+[tool.setuptools]
+packages = [
+  "caenhv_client",
+  "caenhv_client.gui",
+  "caenhv_client.models",
+  "caenhv_client.worker",
+  "caenhv_client.labscript_integration",
+  "caenhv_client.labscript_integration.caenhv",
+]
+
+[tool.setuptools.package-dir]
+"caenhv_client" = "."
+"caenhv_client.gui" = "gui"
+"caenhv_client.models" = "models"
+"caenhv_client.worker" = "worker"
+"caenhv_client.labscript_integration" = "labscript_integration"
+"caenhv_client.labscript_integration.caenhv" = "labscript_integration/caenhv"
+

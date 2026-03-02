@@ -7,8 +7,15 @@ from typing import Any
 
 from PyQt5 import QtCore, QtWidgets
 
-from caenhv_client.gui.main_window import MainWindow
-from caenhv_client.worker.client_worker import ClientWorker
+try:
+    from .main_window import MainWindow
+except Exception:
+    from main_window import MainWindow
+
+try:
+    from ..worker.client_worker import ClientWorker
+except Exception:
+    from worker.client_worker import ClientWorker
 
 
 class StandaloneMainWindow(MainWindow):
@@ -24,8 +31,7 @@ class StandaloneMainWindow(MainWindow):
         self._poll_timer = QtCore.QTimer(self)
         self._poll_timer.setInterval(1000)
         self._poll_timer.timeout.connect(self._slot_poll_tick)
-        bridge_path = root_dir / "caenhv_devman" / "generated_bridge"
-        self._worker = ClientWorker(bridge_search_paths=[bridge_path])
+        self._worker = ClientWorker()
         self._wire_standalone_slots()
         self._load_connection_inputs()
         app = QtWidgets.QApplication.instance()

@@ -19,7 +19,7 @@ class ClientWorker:
 
     def __init__(
         self,
-        bridge_module: str = "caenhv_devman_bridge",
+        bridge_module: str = "caenhv_devman_client.client",
         bridge_search_paths: list[Path] | None = None,
     ) -> None:
         self._bridge_module_name = bridge_module

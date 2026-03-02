@@ -6,7 +6,10 @@ from typing import Any
 
 from PyQt5 import QtCore, QtWidgets, uic
 
-from caenhv_client.gui.channel_widget import ChannelWidget
+try:
+    from .channel_widget import ChannelWidget
+except Exception:
+    from channel_widget import ChannelWidget
 
 
 class MainWindow(QtWidgets.QWidget):
@@ -39,8 +42,14 @@ class MainWindow(QtWidgets.QWidget):
     def __init__(self, root_dir: Path, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._root_dir = root_dir
-        self._main_ui = root_dir / "caenhv_client" / "gui" / "ui" / "main.ui"
-        self._channel_ui = root_dir / "caenhv_client" / "gui" / "ui" / "channel.ui"
+        candidates = [
+            root_dir / "caenhv-client" / "gui" / "ui",
+            root_dir / "caenhv_client" / "gui" / "ui",
+            Path(__file__).resolve().parent / "ui",
+        ]
+        ui_dir = next((p for p in candidates if (p / "main.ui").exists()), candidates[-1])
+        self._main_ui = ui_dir / "main.ui"
+        self._channel_ui = ui_dir / "channel.ui"
         uic.loadUi(str(self._main_ui), self)
 
         self._channel_widgets: dict[tuple[int, int], ChannelWidget] = {}

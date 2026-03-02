@@ -5,7 +5,10 @@ from pathlib import Path
 
 from PyQt5 import QtWidgets
 
-from caenhv_client.gui.standalone_window import StandaloneMainWindow
+try:
+    from .gui.standalone_window import StandaloneMainWindow
+except Exception:
+    from gui.standalone_window import StandaloneMainWindow
 
 
 def main() -> int:
