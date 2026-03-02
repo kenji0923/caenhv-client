@@ -22,6 +22,7 @@ caenhv_client = "desktop_app:entry_point"
 
 [project.gui-scripts]
 caenhv_client-gui = "desktop_app:entry_point"
+caenhv-client-gui = "desktop_app:entry_point"
 
 [tool.setuptools]
 include-package-data = true
@@ -44,4 +45,4 @@ packages = [
 
 [tool.setuptools.package-data]
 "caenhv_client.gui" = ["ui/*.ui"]
-"caenhv_client" = ["resources/*.svg", "desktop-app.json"]
+"caenhv_client" = ["resources/*.svg", "resources/*.ico", "desktop-app.json"]
