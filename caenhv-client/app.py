@@ -20,12 +20,21 @@ def main() -> int:
         pass
     app = QtWidgets.QApplication(sys.argv)
     root_dir = Path(__file__).resolve().parents[1]
-    icon_path = Path(__file__).resolve().parent / "resources" / "caenhv-client.svg"
-    if icon_path.exists():
-        app_icon = QtGui.QIcon(str(icon_path))
+    resources_dir = Path(__file__).resolve().parent / "resources"
+    app_icon = QtGui.QIcon()
+    for icon_name in (
+        "caenhv-client.ico",
+        "caenhv-client_16.png",
+        "caenhv-client_32.png",
+        "caenhv-client_48.png",
+        "caenhv-client_256.png",
+        "caenhv-client.svg",
+    ):
+        icon_path = resources_dir / icon_name
+        if icon_path.exists():
+            app_icon.addFile(str(icon_path))
+    if not app_icon.isNull():
         app.setWindowIcon(app_icon)
-    else:
-        app_icon = QtGui.QIcon()
     window = StandaloneMainWindow(root_dir)
     if not app_icon.isNull():
         window.setWindowIcon(app_icon)
