@@ -710,6 +710,9 @@ class StandaloneMainWindow(MainWindow):
             parsed = self._parse_reference_key(reference)
             if parsed is None:
                 self._worker.set_link_rule(slot, channel, None, 0.0)
+                widget = self._channel_widgets.get((int(slot), int(channel)))
+                if widget is not None:
+                    widget.set_reference_offset(0.0)
                 self.append_response_log(f"reference cleared slot={slot} ch={channel}")
                 return
             # Link establishment is triggered by MainWindow and handled in
@@ -724,6 +727,9 @@ class StandaloneMainWindow(MainWindow):
             parsed = self._parse_reference_key(reference)
             if parsed is None:
                 self._worker.set_link_rule(slot, channel, None, 0.0)
+                widget = self._channel_widgets.get((int(slot), int(channel)))
+                if widget is not None:
+                    widget.set_reference_offset(0.0)
                 return
             ramp_updates = self._worker.set_link_rule(
                 slot, channel, parsed, float(offset), sync_ramps=True
@@ -848,6 +854,14 @@ class StandaloneMainWindow(MainWindow):
             self.append_response_log(f"reference offset slot={slot} ch={channel} delta={delta}")
             self._apply_cached_linked_widget_settings()
         except Exception as exc:
+            message = str(exc)
+            if "resulted Vset out of range" in message:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Offset Rejected",
+                    f"{message}\n\nOffset change was discarded.",
+                )
+                self._apply_cached_linked_widget_settings()
             self.append_response_log(f"ERROR: {exc}")
 
     @QtCore.pyqtSlot(int, int, str)

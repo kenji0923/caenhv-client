@@ -371,6 +371,7 @@ class ChannelWidget(QtWidgets.QWidget):
         blocker = QtCore.QSignalBlocker(self.doubleSpinBoxReferenceOffset)
         _ = blocker
         self.doubleSpinBoxReferenceOffset.setValue(float(value))
+        self._last_emitted_offset = float(value)
 
     def _on_rup_edit_finished(self) -> None:
         value = float(self.doubleSpinBoxRup.value())

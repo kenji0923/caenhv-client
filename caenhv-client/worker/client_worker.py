@@ -513,6 +513,21 @@ class ClientWorker:
                     )
         return targets
 
+    def _validate_vset_targets_in_range(self, targets: dict[tuple[int, int], float]) -> None:
+        for (slot, channel), target_vset in sorted(targets.items()):
+            limits = self.fetch_channel_constraints(int(slot), int(channel))
+            lo = limits.get("vset_min")
+            hi = limits.get("vset_max")
+            if lo is None or hi is None:
+                continue
+            target = float(target_vset)
+            if float(lo) <= target <= float(hi):
+                continue
+            raise RuntimeError(
+                "resulted Vset out of range for "
+                f"{slot}:{channel} (target={target:.6g}, range={float(lo):.6g}..{float(hi):.6g})"
+            )
+
     def _validate_linked_power_consistency(
         self,
         *,
@@ -803,27 +818,45 @@ class ClientWorker:
     def apply_linked_vset(self, slot: int, channel: int, requested_vset: float) -> None:
         key = (int(slot), int(channel))
         current_rule = self._link_rules.get(key)
+        previous_rule = current_rule
+        updated_rule = False
         if current_rule is not None:
             reference, _offset = current_rule
             ref_state = self._get_channel_state(reference[0], reference[1])
             ref_vset = float(ref_state.get("vset", 0.0))
             self._link_rules[key] = (reference, float(requested_vset) - ref_vset)
-        targets = self._build_linked_targets(requested_values={key: float(requested_vset)})
-        self._validate_linked_power_consistency(initiator=key, affected=set(targets.keys()))
-        self._execute_vset_plan(targets)
+            updated_rule = True
+        try:
+            targets = self._build_linked_targets(requested_values={key: float(requested_vset)})
+            self._validate_vset_targets_in_range(targets)
+            self._validate_linked_power_consistency(initiator=key, affected=set(targets.keys()))
+            self._execute_vset_plan(targets)
+        except Exception:
+            if updated_rule:
+                if previous_rule is None:
+                    self._link_rules.pop(key, None)
+                else:
+                    self._link_rules[key] = previous_rule
+            raise
 
     def apply_linked_offset(self, slot: int, channel: int, offset: float) -> None:
         key = (int(slot), int(channel))
         current = self._link_rules.get(key)
         if current is None:
             raise RuntimeError(f"channel {slot}:{channel} has no reference link")
+        previous_rule = current
         reference, _ = current
         self._link_rules[key] = (reference, float(offset))
-        ref_state = self._get_channel_state(reference[0], reference[1])
-        target_vset = float(ref_state.get("vset", 0.0)) + float(offset)
-        targets = self._build_linked_targets(requested_values={key: target_vset})
-        self._validate_linked_power_consistency(initiator=key, affected=set(targets.keys()))
-        self._execute_vset_plan(targets)
+        try:
+            ref_state = self._get_channel_state(reference[0], reference[1])
+            target_vset = float(ref_state.get("vset", 0.0)) + float(offset)
+            targets = self._build_linked_targets(requested_values={key: target_vset})
+            self._validate_vset_targets_in_range(targets)
+            self._validate_linked_power_consistency(initiator=key, affected=set(targets.keys()))
+            self._execute_vset_plan(targets)
+        except Exception:
+            self._link_rules[key] = previous_rule
+            raise
 
     def apply_linked_power(self, slot: int, channel: int, enabled: bool) -> None:
         key = (int(slot), int(channel))
