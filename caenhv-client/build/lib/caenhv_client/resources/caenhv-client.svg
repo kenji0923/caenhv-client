@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="512" height="512" version="1.1" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+ <rect width="512" height="512" fill="#f00" stroke="#f0f" stroke-linecap="square" stroke-width="2"/>
+ <path d="m1.2384 255.95v-254.71h509.41v509.41h-509.41z" fill="#bb2d27"/>
+ <text x="259.16406" y="175.83382" fill="#ffffff" font-family="Arial" stop-color="#000000" stroke-width="2" text-anchor="middle" style="-inkscape-stroke:none;line-height:1;text-decoration-color:#000000" xml:space="preserve"><tspan x="259.16406" y="175.83382" font-size="170.67px" text-align="center" style="line-height:1">CAEN</tspan><tspan x="259.16406" y="346.50079" font-size="170.67px" text-align="center" style="line-height:1">HV</tspan><tspan x="259.16406" y="459.24457" font-size="96px" text-align="center" style="line-height:1">w/ devman</tspan></text>
+</svg>

@@ -1,0 +1,7 @@
+[console_scripts]
+caenhv-client = caenhv_client.app:main
+caenhv-client-install-shortcut = caenhv_client.install_shortcut:main
+
+[gui_scripts]
+caenhv-client-gui = caenhv_client.app:main
+caenhv_client-gui = caenhv_client.app:main

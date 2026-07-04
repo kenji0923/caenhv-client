@@ -1,0 +1,56 @@
+name: Build Windows executable
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install application and build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install ./caenhv-devman-client
+          pip install ./caenhv-client-python
+          pip install "./caenhv-client[gui]"
+          pip install pyinstaller
+      - name: Build executable
+        run: >
+          pyinstaller --noconfirm --onefile --windowed
+          --name caenhv-client
+          --icon caenhv-client/resources/caenhv-client.ico
+          --collect-data caenhv_client
+          --hidden-import caenhv_devman_client.client
+          --hidden-import caenhv_client_python
+          --hidden-import devman_runtime
+          packaging/pyinstaller_entry.py
+      - name: Smoke test (shortcut CLI path)
+        run: dist\caenhv-client.exe --remove-shortcut
+      - uses: actions/upload-artifact@v4
+        with:
+          name: caenhv-client-windows
+          path: dist/caenhv-client.exe
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: caenhv-client-windows
+          path: dist/
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/caenhv-client.exe

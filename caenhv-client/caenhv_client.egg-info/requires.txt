@@ -1,0 +1,4 @@
+caenhv-devman-client>=0.2.0
+
+[gui]
+PyQt5>=5.15
