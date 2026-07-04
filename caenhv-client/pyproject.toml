@@ -9,7 +9,6 @@ description = "Standalone client for CAEN HV via devman, with a local-socket fir
 requires-python = ">=3.10"
 dependencies = [
   "caenhv-devman-client>=0.1.0",
-  "desktop-app>=0.3",
 ]
 
 [project.optional-dependencies]
@@ -17,7 +16,7 @@ gui = ["PyQt5>=5.15"]
 
 [project.scripts]
 caenhv-client = "caenhv_client.app:main"
-caenhv_client = "desktop_app:entry_point"
+caenhv-client-install-shortcut = "caenhv_client.install_shortcut:main"
 
 [project.gui-scripts]
 caenhv_client-gui = "caenhv_client.app:main"
@@ -38,4 +37,4 @@ packages = [
 
 [tool.setuptools.package-data]
 "caenhv_client.gui" = ["ui/*.ui"]
-"caenhv_client" = ["resources/*.svg", "resources/*.ico", "desktop-app.json"]
+"caenhv_client" = ["resources/*.svg", "resources/*.ico", "resources/*.png"]
