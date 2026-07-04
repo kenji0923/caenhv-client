@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -16,13 +17,23 @@ except Exception:
     from gui.standalone_window import StandaloneMainWindow
 
 
-def main() -> int:
-    try:
-        from desktop_app import set_process_appid
+WINDOWS_APP_ID = "kenji0923.caenhv_client"
 
-        set_process_appid("caenhv_client")
+
+def _set_windows_appid() -> None:
+    # Give the process its own taskbar identity/icon instead of Python's.
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(WINDOWS_APP_ID)
     except Exception:
         pass
+
+
+def main() -> int:
+    _set_windows_appid()
     app = QtWidgets.QApplication(sys.argv)
     if notify_gui():
         print("caenhv-client is already running; raised the existing window.")

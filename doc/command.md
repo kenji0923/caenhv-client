@@ -12,6 +12,17 @@ python -m caenhv_client
 
 If an instance is already running, a second invocation raises the existing window (without taking keyboard focus) and exits immediately.
 
+## Start-menu shortcut (Windows)
+
+Purpose: create (or remove) a Start-menu shortcut that launches the GUI with the application icon and no console window. This replaces the former `desktop-app install` mechanism.
+
+```sh
+caenhv-client-install-shortcut           # create the shortcut
+caenhv-client-install-shortcut --remove  # remove it
+```
+
+Windows only; on other platforms the command exits with a message. The shortcut points at the `caenhv-client-gui` script of the environment the command is run from.
+
 The IPC server name defaults to `caenhv-client`; set the `CAENHV_CLIENT_IPC_NAME` environment variable (in both the GUI and the caller) to use a different name, e.g. to run independent instances.
 
 ## Fire the GUI from another project (e.g. a BLACS tab or worker)
