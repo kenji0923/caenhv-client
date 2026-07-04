@@ -340,7 +340,7 @@ class ClientWorker:
             raise RuntimeError("reference channel cannot be itself")
         self._link_rules[key] = ((ref_slot, ref_channel), float(offset))
         if sync_ramps:
-            return self._sync_link_ramps(key, (ref_slot, ref_channel))
+            return self._sync_link_ramps(self.get_linked_channels_recursive(key[0], key[1]))
         return None
 
     def set_link_offset(self, slot: int, channel: int, offset: float) -> None:
@@ -403,28 +403,42 @@ class ClientWorker:
                 continue
         return None
 
-    def _sync_link_ramps(self, ch_a: tuple[int, int], ch_b: tuple[int, int]) -> dict[str, float]:
-        a_slot, a_ch = int(ch_a[0]), int(ch_a[1])
-        b_slot, b_ch = int(ch_b[0]), int(ch_b[1])
+    def _channels_span_mixed_polarity(self, channels: set[tuple[int, int]]) -> bool:
+        polarities = {self._slot_is_negative(int(slot)) for slot, _channel in channels}
+        return len(polarities) > 1
 
-        a_rup = self._get_numeric_param_any(a_slot, a_ch, ["RUp", "RUP"])
-        b_rup = self._get_numeric_param_any(b_slot, b_ch, ["RUp", "RUP"])
-        a_rdown = self._get_numeric_param_any(a_slot, a_ch, ["RDWn", "RDown", "RDWN"])
-        b_rdown = self._get_numeric_param_any(b_slot, b_ch, ["RDWn", "RDown", "RDWN"])
+    def _sync_link_ramps(self, channels: set[tuple[int, int]]) -> dict[str, float]:
+        group = sorted({(int(s), int(c)) for (s, c) in channels})
+        if len(group) < 2:
+            return {}
 
-        target_rup: float | None = None
-        target_rdown: float | None = None
-        if a_rup is not None and b_rup is not None:
-            target_rup = min(float(a_rup[0]), float(b_rup[0]))
-        if a_rdown is not None and b_rdown is not None:
-            target_rdown = min(float(a_rdown[0]), float(b_rdown[0]))
+        rup_values: list[float] = []
+        rdown_values: list[float] = []
+        for slot, channel in group:
+            rup = self._get_numeric_param_any(slot, channel, ["RUp", "RUP"])
+            if rup is not None:
+                rup_values.append(float(rup[0]))
+            rdown = self._get_numeric_param_any(slot, channel, ["RDWn", "RDown", "RDWN"])
+            if rdown is not None:
+                rdown_values.append(float(rdown[0]))
+
+        target_rup: float | None = min(rup_values) if rup_values else None
+        target_rdown: float | None = min(rdown_values) if rdown_values else None
+
+        # In a mixed-polarity group a joint shift runs RUp on one channel
+        # against RDWn on another, so every ramp value must be identical;
+        # take the slowest of all of them.
+        if self._channels_span_mixed_polarity(set(group)):
+            candidates = [v for v in (target_rup, target_rdown) if v is not None]
+            if candidates:
+                target_rup = target_rdown = min(candidates)
 
         if target_rup is not None:
-            self._set_param_any(a_slot, a_ch, ["RUp", "RUP"], float(target_rup))
-            self._set_param_any(b_slot, b_ch, ["RUp", "RUP"], float(target_rup))
+            for slot, channel in group:
+                self._set_param_any(slot, channel, ["RUp", "RUP"], float(target_rup))
         if target_rdown is not None:
-            self._set_param_any(a_slot, a_ch, ["RDWn", "RDown", "RDWN"], float(target_rdown))
-            self._set_param_any(b_slot, b_ch, ["RDWn", "RDown", "RDWN"], float(target_rdown))
+            for slot, channel in group:
+                self._set_param_any(slot, channel, ["RDWn", "RDown", "RDWN"], float(target_rdown))
 
         result: dict[str, float] = {}
         if target_rup is not None:
@@ -432,6 +446,23 @@ class ClientWorker:
         if target_rdown is not None:
             result["rdown"] = float(target_rdown)
         return result
+
+    def apply_linked_ramp(self, slot: int, channel: int, field: str, value: float) -> dict[str, float]:
+        """Propagate a rup/rdown edit across the linked group.
+
+        Mixed-polarity groups keep RUp and RDWn identical, so an edit to
+        either field is applied to both parameters on every linked channel.
+        """
+        name = str(field).strip().lower()
+        if name not in ("rup", "rdown"):
+            raise ValueError(f"unsupported ramp field: {field}")
+        linked = self.get_linked_channels_recursive(int(slot), int(channel))
+        if self._channels_span_mixed_polarity(linked):
+            self.set_param_for_channels(linked, "RUp", float(value))
+            self.set_param_for_channels(linked, "RDWn", float(value))
+            return {"rup": float(value), "rdown": float(value)}
+        self.set_param_for_channels(linked, "RUp" if name == "rup" else "RDWn", float(value))
+        return {name: float(value)}
 
     def _get_channel_state(self, slot: int, channel: int) -> dict[str, Any]:
         key = (int(slot), int(channel))

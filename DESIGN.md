@@ -14,6 +14,12 @@ By setting a ref channel and relative level to it, it coordinate requests to ser
 5. Execute the commands in the queue.
 4. Update Vset values if succeeded. If failed, dispose the modification in widgets.
 
+### Ramp synchronization
+CAEN defines RUp/RDWn in magnitude space (away from / toward zero), so the parameter pair that races during a joint shift depends on board polarity. When a link is established (and when a linked rup/rdown is edited), ramps are synchronized over the whole linked group:
+- Group on a single polarity: RUp is equalized across the group, RDWn is equalized across the group (a joint move runs the same named parameter on all channels).
+- Group spanning both polarities: a joint shift runs RUp on one polarity against RDWn on the other, so RUp and RDWn of all channels are forced to one common value.
+On link establishment the slowest (minimum) of the involved values is used.
+
 ## GUI
 The GUI runs only as a standalone Qt application. It is split into three layers:
 - `gui/main_window.py` (`MainWindow`): pure UI; emits request signals, exposes update slots.

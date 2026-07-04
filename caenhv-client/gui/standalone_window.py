@@ -417,13 +417,11 @@ class StandaloneMainWindow(MainWindow):
                     handled.add(token)
                     continue
                 if field in ("rup", "rdown") and len(linked) > 1:
-                    param_name = "RUp" if field == "rup" else "RDWn"
                     if choice == "local":
-                        self._worker.set_param_for_channels(linked, param_name, float(local_value))
-                        if field == "rup":
-                            self.apply_link_ramp_values(list(linked), {"rup": float(local_value)})
-                        else:
-                            self.apply_link_ramp_values(list(linked), {"rdown": float(local_value)})
+                        updates = self._worker.apply_linked_ramp(
+                            int(slot), int(channel), str(field), float(local_value)
+                        )
+                        self.apply_link_ramp_values(list(linked), updates)
                     else:
                         for ls, lc in sorted(linked):
                             r_payload = self._worker.fetch_channel_settings(int(ls), int(lc))
@@ -755,10 +753,8 @@ class StandaloneMainWindow(MainWindow):
             ramp_updates = self._worker.set_link_rule(
                 slot, channel, parsed, float(offset), sync_ramps=True
             ) or {}
-            self.apply_link_ramp_values(
-                [(int(slot), int(channel)), (int(parsed[0]), int(parsed[1]))],
-                ramp_updates,
-            )
+            linked = self._worker.get_linked_channels_recursive(slot, channel)
+            self.apply_link_ramp_values(sorted(linked), ramp_updates)
             self.append_response_log(
                 f"link established slot={slot} ch={channel} reference={reference} offset={offset:.3f}"
             )
@@ -824,10 +820,11 @@ class StandaloneMainWindow(MainWindow):
     def _slot_rup(self, slot: int, channel: int, value: float) -> None:
         try:
             linked = self._worker.get_linked_channels_recursive(slot, channel)
-            self._worker.set_param_for_channels(linked, "RUp", value)
-            self.apply_link_ramp_values(list(linked), {"rup": float(value)})
+            updates = self._worker.apply_linked_ramp(slot, channel, "rup", value)
+            self.apply_link_ramp_values(list(linked), updates)
+            note = " (mixed polarity: RDWn kept equal)" if "rdown" in updates else ""
             self.append_response_log(
-                f"rup changed propagated count={len(linked)} initiator={slot}:{channel} value={value}"
+                f"rup changed propagated count={len(linked)} initiator={slot}:{channel} value={value}{note}"
             )
         except Exception as exc:
             self.append_response_log(f"ERROR: {exc}")
@@ -836,10 +833,11 @@ class StandaloneMainWindow(MainWindow):
     def _slot_rdown(self, slot: int, channel: int, value: float) -> None:
         try:
             linked = self._worker.get_linked_channels_recursive(slot, channel)
-            self._worker.set_param_for_channels(linked, "RDWn", value)
-            self.apply_link_ramp_values(list(linked), {"rdown": float(value)})
+            updates = self._worker.apply_linked_ramp(slot, channel, "rdown", value)
+            self.apply_link_ramp_values(list(linked), updates)
+            note = " (mixed polarity: RUp kept equal)" if "rup" in updates else ""
             self.append_response_log(
-                f"rdown changed propagated count={len(linked)} initiator={slot}:{channel} value={value}"
+                f"rdown changed propagated count={len(linked)} initiator={slot}:{channel} value={value}{note}"
             )
         except Exception as exc:
             self.append_response_log(f"ERROR: {exc}")
