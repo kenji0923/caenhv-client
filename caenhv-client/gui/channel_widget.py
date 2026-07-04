@@ -82,10 +82,10 @@ class ChannelWidget(QtWidgets.QWidget):
         self.labelVmon.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         self.labelImon.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
 
-    def _format_float(self, value: object, unit: str) -> str:
+    def _format_float(self, value: object, unit: str, apply_polarity: bool = True) -> str:
         try:
             num = float(value)
-            if self._negative_polarity:
+            if apply_polarity and self._negative_polarity:
                 num = -abs(num)
             return f"{num:0.2f} {unit}"
         except Exception:
@@ -417,7 +417,9 @@ class ChannelWidget(QtWidgets.QWidget):
         if "vmon" in payload:
             self.labelVmon.setText(self._format_float(payload["vmon"], "V"))
         if "imon" in payload:
-            self.labelImon.setText(self._format_float(payload["imon"], "uA"))
+            # CAEN reports IMon as an unsigned magnitude; polarity applies
+            # only to voltage displays.
+            self.labelImon.setText(self._format_float(payload["imon"], "uA", apply_polarity=False))
         if "status" in payload:
             self.labelStatus.setText(self._format_status(payload["status"]))
 
