@@ -30,6 +30,9 @@ class StandaloneMainWindow(MainWindow):
         super().__init__(root_dir, parent)
         self._settings = self._create_settings("caenhv_client_standalone")
         self._widget_init_done: set[tuple[int, int]] = set()
+        self._trip_alerted: set[tuple[int, int]] = set()
+        self._link_lease_tick = 0
+        self._last_lease_push_status = ""
         self._settings_check_running = False
         self._last_settings_check_monotonic = 0.0
         self._last_ui_activity_monotonic = time.monotonic()
@@ -143,6 +146,12 @@ class StandaloneMainWindow(MainWindow):
             payload = self._worker.connect_client(host, port, client_name, force=bool(force))
             self.on_connected(payload)
             self._slot_refresh_resources()
+            # Reconcile the server registry with the state actually restored
+            # in this session: replaces (or clears) any stale groups left
+            # under this client name by previous sessions.
+            self._worker.push_link_groups()
+            self._log_link_registry_status()
+            self._log_foreign_link_groups()
             self._poll_timer.start()
         except Exception as exc:
             self.append_response_log(f"ERROR: {exc}")
@@ -172,9 +181,116 @@ class StandaloneMainWindow(MainWindow):
             for slot, ch in list(self._channel_widgets.keys()):
                 payload = self._worker.refresh_channel_snapshot(int(slot), int(ch))
                 self.on_channel_updated(int(slot), int(ch), payload)
+                if "status" in payload:
+                    self._handle_trip_check(int(slot), int(ch), payload["status"])
+            self._renew_link_lease()
             self._maybe_run_periodic_settings_check()
         except Exception as exc:
             self.append_response_log(f"ERROR: {exc}")
+
+    _LINK_LEASE_TICKS = 30  # re-push link groups every N poll ticks (~seconds)
+
+    def _renew_link_lease(self) -> None:
+        # Periodic re-push keeps the server registry self-healing: it renews
+        # the client lease and restores groups a janitor may have removed
+        # during a network outage.
+        self._link_lease_tick += 1
+        if self._link_lease_tick < self._LINK_LEASE_TICKS:
+            return
+        self._link_lease_tick = 0
+        self._worker.push_link_groups()
+        status = str(getattr(self._worker, "link_push_status", "") or "")
+        if status.startswith("error") and status != self._last_lease_push_status:
+            self.append_response_log(f"WARNING: link registry lease renewal failed: {status}")
+        self._last_lease_push_status = status
+
+    def _handle_trip_check(self, slot: int, channel: int, status: object) -> None:
+        key = (int(slot), int(channel))
+        try:
+            bits = int(status)
+        except Exception:
+            return
+        if not bits & self._worker.TRIP_STATUS_MASK:
+            self._trip_alerted.discard(key)
+            return
+        if key in self._trip_alerted:
+            return
+        self._trip_alerted.add(key)
+        try:
+            powered_off = self._worker.check_trip_and_power_off_partners(slot, channel, bits)
+        except Exception as exc:
+            self.append_response_log(f"ERROR: trip reaction failed for {slot}:{channel}: {exc}")
+            return
+        if powered_off is None:
+            widget = self._channel_widgets.get(key)
+            if widget is not None:
+                widget.apply_settings({"power": False})
+            self.append_response_log(f"WARNING: TRIP detected on {slot}:{channel} (not linked)")
+            return
+        names = ", ".join(f"{s}:{c}" for s, c in powered_off) if powered_off else "none (already off)"
+        self.append_response_log(
+            f"WARNING: TRIP detected on {slot}:{channel}; powered off linked partners: {names}"
+        )
+        self._apply_cached_linked_widget_settings()
+
+    def _log_link_registry_status(self) -> None:
+        status = str(getattr(self._worker, "link_push_status", "") or "")
+        if status.startswith("error"):
+            self.append_response_log(f"WARNING: server link registry update failed: {status}")
+        elif status == "unsupported":
+            self.append_response_log(
+                "NOTE: devman server/bridge has no link-group registry; server trip watchdog inactive"
+            )
+        elif status.startswith("ok:"):
+            self.append_response_log(f"server link registry updated ({status[3:]} groups)")
+        trip = str(getattr(self._worker, "trip_line_status", "") or "")
+        if trip.startswith("error"):
+            self.append_response_log(f"WARNING: hardware trip-line sync failed: {trip}")
+        elif trip:
+            self.append_response_log(trip)
+
+    def _log_foreign_link_groups(self) -> None:
+        try:
+            registered = self._worker.list_registered_link_groups()
+        except Exception:
+            return
+        if not registered:
+            return
+        own = str(getattr(self._worker, "_client_name", "") or "")
+        for client, groups in sorted(registered.items()):
+            if client == own or not groups:
+                continue
+            summary = "; ".join(", ".join(members) for members in groups)
+            self.append_response_log(
+                f"NOTE: server watchdog also protects groups registered by client '{client}': {summary}"
+            )
+
+    def _log_move_notices(self, slot: int, channel: int, result: dict | None) -> None:
+        result = result or {}
+        resync = result.get("ramp_resync")
+        if resync:
+            linked = self._worker.get_linked_channels_recursive(int(slot), int(channel))
+            self.apply_link_ramp_values(sorted(linked), resync)
+            self.append_response_log(
+                f"WARNING: ramp rates had drifted; re-synced linked group to {resync}"
+            )
+        ramping = result.get("ramping")
+        if ramping:
+            names = ", ".join(f"{s}:{c}" for s, c in ramping)
+            self.append_response_log(f"WARNING: move issued while still ramping: {names}")
+        pdown_synced = result.get("pdown_synced")
+        if pdown_synced is not None:
+            linked = self._worker.get_linked_channels_recursive(int(slot), int(channel))
+            for l_slot, l_channel in sorted(linked):
+                w = self._channel_widgets.get((int(l_slot), int(l_channel)))
+                if w is not None:
+                    w.apply_settings({"pdown": str(pdown_synced)})
+            self.append_response_log(
+                f"WARNING: PDWN had drifted; synced linked group to '{pdown_synced}'"
+            )
+        warning = result.get("warning")
+        if warning:
+            self.append_response_log(f"WARNING: {warning}")
 
     def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
         if event.type() in (
@@ -302,14 +418,10 @@ class StandaloneMainWindow(MainWindow):
             widget.checkBoxEnable.setChecked(bool(int(remote_value)))
             return
         if field == "rup":
-            blocker = QtCore.QSignalBlocker(widget.doubleSpinBoxRup)
-            _ = blocker
-            widget.doubleSpinBoxRup.setValue(float(remote_value))
+            widget.set_ramp_values(rup=float(remote_value))
             return
         if field == "rdown":
-            blocker = QtCore.QSignalBlocker(widget.doubleSpinBoxRdown)
-            _ = blocker
-            widget.doubleSpinBoxRdown.setValue(float(remote_value))
+            widget.set_ramp_values(rdwn=float(remote_value))
             return
         if field == "trip":
             blocker = QtCore.QSignalBlocker(widget.doubleSpinBoxTrip)
@@ -670,6 +782,10 @@ class StandaloneMainWindow(MainWindow):
                     svmax_min=limits.get("svmax_min"),
                     svmax_max=limits.get("svmax_max"),
                 )
+                widget.set_ramp_limits(
+                    rup_max=limits.get("rup_max"),
+                    rdwn_max=limits.get("rdwn_max"),
+                )
                 widget.apply_settings(payload)
                 ref_key = widget.get_reference_key()
                 parsed = self._parse_reference_key(ref_key or "None")
@@ -706,6 +822,17 @@ class StandaloneMainWindow(MainWindow):
             elif action_l == "release":
                 ok = self._worker.release_resource(resource)
                 self.append_response_log(f"release resource={resource} ok={ok}")
+                if ok:
+                    dropped = self._worker.drop_links_for_resource(resource)
+                    for d_slot, d_channel in dropped:
+                        w = self._channel_widgets.get((int(d_slot), int(d_channel)))
+                        if w is not None:
+                            w.set_reference_key(None)
+                            w.set_reference_offset(0.0)
+                    if dropped:
+                        names = ", ".join(f"{s}:{c}" for s, c in dropped)
+                        self.append_response_log(f"links dropped due to release: {names}")
+                        self._log_link_registry_status()
             else:
                 return
             self._slot_refresh_resources()
@@ -755,16 +882,26 @@ class StandaloneMainWindow(MainWindow):
             ) or {}
             linked = self._worker.get_linked_channels_recursive(slot, channel)
             self.apply_link_ramp_values(sorted(linked), ramp_updates)
+            if "pdown" in ramp_updates:
+                for l_slot, l_channel in sorted(linked):
+                    w = self._channel_widgets.get((int(l_slot), int(l_channel)))
+                    if w is not None:
+                        w.apply_settings({"pdown": str(ramp_updates["pdown"])})
+                self.append_response_log(
+                    f"link sync: PDWN adopted from reference: '{ramp_updates['pdown']}'"
+                )
             self.append_response_log(
                 f"link established slot={slot} ch={channel} reference={reference} offset={offset:.3f}"
             )
+            self._log_link_registry_status()
         except Exception as exc:
             self.append_response_log(f"ERROR: {exc}")
 
     @QtCore.pyqtSlot(int, int, float)
     def _slot_channel_vset(self, slot: int, channel: int, value: float) -> None:
         try:
-            self._worker.apply_linked_vset(slot, channel, value)
+            result = self._worker.apply_linked_vset(slot, channel, value)
+            self._log_move_notices(slot, channel, result)
             self.append_response_log(
                 f"linked vset request slot={slot} ch={channel} requested_vset={value}"
             )
@@ -805,7 +942,10 @@ class StandaloneMainWindow(MainWindow):
                     )
                     return
             if apply_all:
-                self._worker.set_power_for_channels(linked, bool(enabled))
+                info = self._worker.set_power_for_channels(
+                    linked, bool(enabled), initiator=(int(slot), int(channel))
+                )
+                self._log_move_notices(slot, channel, info)
                 self.append_response_log(
                     f"power toggle linked count={len(linked)} initiator={slot}:{channel} enabled={enabled}"
                 )
@@ -869,7 +1009,8 @@ class StandaloneMainWindow(MainWindow):
     @QtCore.pyqtSlot(int, int, float)
     def _slot_reference_offset_changed(self, slot: int, channel: int, delta: float) -> None:
         try:
-            self._worker.apply_linked_offset(slot, channel, float(delta))
+            result = self._worker.apply_linked_offset(slot, channel, float(delta))
+            self._log_move_notices(slot, channel, result)
             self.append_response_log(f"reference offset slot={slot} ch={channel} delta={delta}")
             self._apply_cached_linked_widget_settings()
         except Exception as exc:
@@ -886,7 +1027,21 @@ class StandaloneMainWindow(MainWindow):
     @QtCore.pyqtSlot(int, int, str)
     def _slot_pdown(self, slot: int, channel: int, mode: str) -> None:
         try:
-            self._worker.set_channel_param(slot, channel, "PDWN", mode)
-            self.append_response_log(f"pdown changed slot={slot} ch={channel} mode={mode}")
+            linked = self._worker.get_linked_channels_recursive(slot, channel)
+            if len(linked) > 1:
+                for l_slot, l_channel in sorted(linked):
+                    self._worker.set_channel_param(int(l_slot), int(l_channel), "PDWN", mode)
+                for l_slot, l_channel in sorted(linked):
+                    if (int(l_slot), int(l_channel)) == (int(slot), int(channel)):
+                        continue
+                    w = self._channel_widgets.get((int(l_slot), int(l_channel)))
+                    if w is not None:
+                        w.apply_settings({"pdown": str(mode)})
+                self.append_response_log(
+                    f"pdown changed propagated count={len(linked)} initiator={slot}:{channel} mode={mode}"
+                )
+            else:
+                self._worker.set_channel_param(slot, channel, "PDWN", mode)
+                self.append_response_log(f"pdown changed slot={slot} ch={channel} mode={mode}")
         except Exception as exc:
             self.append_response_log(f"ERROR: {exc}")

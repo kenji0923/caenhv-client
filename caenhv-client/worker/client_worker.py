@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import math
 import os
+import re
 import sys
 from collections import deque
 from pathlib import Path
@@ -33,33 +34,55 @@ class ClientWorker:
         self._slot_negative_polarity: dict[int, bool] = {}
         self._link_rules: dict[tuple[int, int], tuple[tuple[int, int], float]] = {}
         self._channel_state: dict[tuple[int, int], dict[str, Any]] = {}
+        self.link_push_status: str = ""
+        self.trip_line_status: str = ""
+        self._param_names_cache: dict[tuple[int, int], set[str]] = {}
+        self._internal_trip_lines_cache: dict[int, int] = {}
+        self._trip_line_alloc: dict[frozenset[tuple[int, int]], tuple[str, int]] = {}
+        self._trip_lines_scanned = False
+        self._external_trip_lines_in_use: set[int] = set()
+        self._internal_trip_lines_in_use: dict[int, set[int]] = {}
 
     def _slot_is_negative(self, slot: int) -> bool:
         return bool(self._slot_negative_polarity.get(int(slot), False))
 
     def _to_ui_voltage(self, slot: int, param_name: str, value: Any) -> Any:
         name = str(param_name).strip().upper()
-        if name not in ("V0SET", "SVMAX"):
-            return value
-        try:
-            num = float(value)
-        except Exception:
-            return value
-        if self._slot_is_negative(slot):
-            return -abs(num)
-        return num
+        if name in ("V0SET", "SVMAX"):
+            try:
+                num = float(value)
+            except Exception:
+                return value
+            return -abs(num) if self._slot_is_negative(slot) else num
+        if name in ("RUP", "RDWN", "RDOWN"):
+            # Signed slew convention: the sign is the direction of signed-
+            # voltage motion the parameter governs (matches Telegraf logging).
+            try:
+                num = float(value)
+            except Exception:
+                return value
+            negative = self._slot_is_negative(slot)
+            if name == "RUP":
+                return -abs(num) if negative else abs(num)
+            return abs(num) if negative else -abs(num)
+        return value
 
     def _to_backend_voltage(self, slot: int, param_name: str, value: Any) -> Any:
         name = str(param_name).strip().upper()
-        if name not in ("V0SET", "SVMAX"):
-            return value
-        try:
-            num = float(value)
-        except Exception:
-            return value
-        if self._slot_is_negative(slot):
+        if name in ("V0SET", "SVMAX"):
+            try:
+                num = float(value)
+            except Exception:
+                return value
+            return abs(num) if self._slot_is_negative(slot) else num
+        if name in ("RUP", "RDWN", "RDOWN"):
+            # CAEN always takes ramp rates as magnitudes.
+            try:
+                num = float(value)
+            except Exception:
+                return value
             return abs(num)
-        return num
+        return value
 
     def _get_param_prop(self, slot: int, channel: int, param_name: str) -> tuple[float, float] | None:
         bridge = self._ensure_bridge()
@@ -96,6 +119,12 @@ class ClientWorker:
                 ui_lo, ui_hi = ui_hi, ui_lo
             result[f"{out_prefix}_min"] = ui_lo
             result[f"{out_prefix}_max"] = ui_hi
+        for names, out_key in ((["RUp", "RUP"], "rup_max"), (["RDWn", "RDown", "RDWN"], "rdwn_max")):
+            for param_name in names:
+                prop = self._get_param_prop(slot, channel, param_name)
+                if prop is not None:
+                    result[out_key] = max(abs(float(prop[0])), abs(float(prop[1])))
+                    break
         return result
 
     def _ensure_bridge(self, *, client_name: str | None = None) -> ModuleType:
@@ -137,6 +166,11 @@ class ClientWorker:
         self._slot_negative_polarity = {}
         self._link_rules = {}
         self._channel_state = {}
+        self._param_names_cache = {}
+        self._internal_trip_lines_cache = {}
+        self._trip_lines_scanned = False
+        self._external_trip_lines_in_use = set()
+        self._internal_trip_lines_in_use = {}
 
     def _board_name(self, board: Any) -> str:
         if isinstance(board, dict):
@@ -330,18 +364,37 @@ class ClientWorker:
         offset: float = 0.0,
         *,
         sync_ramps: bool = False,
-    ) -> dict[str, float] | None:
+    ) -> dict[str, Any] | None:
         key = (int(slot), int(channel))
         if reference is None:
-            self._link_rules.pop(key, None)
+            removed = self._link_rules.pop(key, None)
+            if removed is not None:
+                self._after_link_change()
             return None
         ref_slot, ref_channel = int(reference[0]), int(reference[1])
         if key == (ref_slot, ref_channel):
             raise RuntimeError("reference channel cannot be itself")
+        previous_rule = self._link_rules.get(key)
         self._link_rules[key] = ((ref_slot, ref_channel), float(offset))
-        if sync_ramps:
-            return self._sync_link_ramps(self.get_linked_channels_recursive(key[0], key[1]))
-        return None
+        if not sync_ramps:
+            self._after_link_change()
+            return None
+        # The link is only kept if the group could actually be synchronized;
+        # a partial sync would leave linked channels with unequal rates.
+        try:
+            group = self.get_linked_channels_recursive(key[0], key[1])
+            updates: dict[str, Any] = dict(self._sync_link_ramps(group))
+            pdown = self._sync_link_pdown(group, adopt_from=(ref_slot, ref_channel))
+            if pdown is not None:
+                updates["pdown"] = pdown
+        except Exception:
+            if previous_rule is None:
+                self._link_rules.pop(key, None)
+            else:
+                self._link_rules[key] = previous_rule
+            raise
+        self._after_link_change()
+        return updates
 
     def set_link_offset(self, slot: int, channel: int, offset: float) -> None:
         key = (int(slot), int(channel))
@@ -367,7 +420,293 @@ class ClientWorker:
 
     def drop_stale_links(self, active_channels: set[tuple[int, int]]) -> None:
         active = {(int(s), int(c)) for (s, c) in active_channels}
+        before = len(self._link_rules)
         self._link_rules = {k: v for k, v in self._link_rules.items() if k in active and v[0] in active}
+        if len(self._link_rules) != before:
+            self._after_link_change()
+
+    @staticmethod
+    def _channel_resource(slot: int, channel: int) -> str:
+        return f"slot:{int(slot)}:ch:{int(channel)}"
+
+    def _link_group_components(self) -> list[set[tuple[int, int]]]:
+        neighbors = self._linked_neighbors()
+        seen: set[tuple[int, int]] = set()
+        components: list[set[tuple[int, int]]] = []
+        for start in sorted(neighbors):
+            if start in seen:
+                continue
+            component: set[tuple[int, int]] = set()
+            queue: deque[tuple[int, int]] = deque([start])
+            while queue:
+                node = queue.popleft()
+                if node in component:
+                    continue
+                component.add(node)
+                queue.extend(neighbors.get(node, set()) - component)
+            seen |= component
+            if len(component) >= 2:
+                components.append(component)
+        return components
+
+    def link_groups(self) -> list[list[str]]:
+        """Connected components of the link graph as resource-string groups."""
+        return [
+            [self._channel_resource(s, c) for s, c in sorted(component)]
+            for component in self._link_group_components()
+        ]
+
+    def push_link_groups(self) -> None:
+        """Best-effort sync of the link groups to the devman server registry.
+
+        The server-side trip watchdog protects registered groups even while
+        this client is closed. Failures are recorded in link_push_status for
+        the UI to report; they never break the local link operation.
+        """
+        try:
+            bridge = self._ensure_bridge()
+            if not hasattr(bridge, "set_link_groups"):
+                self.link_push_status = "unsupported"
+                return
+            count = int(bridge.set_link_groups(self.link_groups()))
+            self.link_push_status = f"ok:{count}"
+        except Exception as exc:
+            self.link_push_status = f"error: {exc}"
+
+    def list_registered_link_groups(self) -> dict[str, list[list[str]]] | None:
+        """All link groups registered on the server, or None if unsupported."""
+        bridge = self._ensure_bridge()
+        if not hasattr(bridge, "list_link_groups"):
+            return None
+        return bridge.list_link_groups()
+
+    def drop_links_for_resource(self, resource: str) -> list[tuple[int, int]]:
+        """Drop link rules involving channels covered by a released resource.
+
+        Returns the source keys whose rules were removed so the UI can clear
+        their reference selections.
+        """
+        text = str(resource).strip()
+        match_channel = re.match(r"^slot:(\d+):ch:(\d+)$", text)
+        match_slot = re.match(r"^slot:(\d+)$", text)
+
+        def covers(key: tuple[int, int]) -> bool:
+            if match_channel:
+                return key == (int(match_channel.group(1)), int(match_channel.group(2)))
+            if match_slot:
+                return key[0] == int(match_slot.group(1))
+            return False
+
+        dropped: list[tuple[int, int]] = []
+        for source, (reference, _offset) in list(self._link_rules.items()):
+            if covers(source) or covers(reference):
+                self._link_rules.pop(source, None)
+                dropped.append(source)
+        if dropped:
+            self._after_link_change()
+        return sorted(dropped)
+
+    def _after_link_change(self) -> None:
+        self.push_link_groups()
+        self.sync_trip_lines()
+
+    # --- Hardware trip lines (TripInt / TripExt) -------------------------
+    #
+    # CAEN boards expose TripInt (per-board internal trip bus, 2N-bit word:
+    # bits [0..N-1] sense a line, bits [N..2N-1] propagate onto it) and
+    # TripExt (crate-wide external trip bus, 8-bit word: bits 0-3 sense
+    # lines 0-3, bits 4-7 propagate). Channels sharing a line trip together
+    # in hardware, with no software in the loop.
+
+    _TRIPINT_NAMES = ["TripInt", "TRIPINT"]
+    _TRIPEXT_NAMES = ["TripExt", "TRIPEXT"]
+    _EXTERNAL_TRIP_LINES = 4
+
+    def _channel_param_names(self, slot: int, channel: int) -> set[str]:
+        key = (int(slot), int(channel))
+        cached = self._param_names_cache.get(key)
+        if cached is not None:
+            return cached
+        names: set[str] = set()
+        try:
+            bridge = self._ensure_bridge()
+            info = bridge.Device_get_ch_param_info(int(slot), int(channel))
+            if isinstance(info, (list, tuple)):
+                names = {str(n) for n in info}
+        except Exception:
+            names = set()
+        self._param_names_cache[key] = names
+        return names
+
+    def _first_param_name(self, slot: int, channel: int, candidates: list[str]) -> str | None:
+        names = self._channel_param_names(slot, channel)
+        for name in candidates:
+            if name in names:
+                return name
+        return None
+
+    def _internal_trip_line_count(self, slot: int) -> int:
+        cached = self._internal_trip_lines_cache.get(int(slot))
+        if cached is not None:
+            return cached
+        count = 0
+        name = self._first_param_name(int(slot), 0, self._TRIPINT_NAMES)
+        if name is not None:
+            prop = self._get_param_prop(int(slot), 0, name)
+            if prop is not None:
+                # TripInt is a 2N-bit word, so maxval = 2^(2N) - 1.
+                maxval = int(prop[1])
+                bits = maxval.bit_length()
+                if maxval == (1 << bits) - 1 and bits % 2 == 0:
+                    count = bits // 2
+        self._internal_trip_lines_cache[int(slot)] = count
+        return count
+
+    def _scan_trip_lines_in_use(self) -> None:
+        if self._trip_lines_scanned:
+            return
+        self._trip_lines_scanned = True
+        bridge = self._ensure_bridge()
+        for slot, channel_count in self._slot_channel_counts.items():
+            channels = list(range(int(channel_count)))
+            if not channels:
+                continue
+            ext_name = self._first_param_name(int(slot), 0, self._TRIPEXT_NAMES)
+            if ext_name is not None:
+                try:
+                    values = bridge.Device_get_ch_param(int(slot), channels, ext_name)
+                    for value in values or []:
+                        word = int(value)
+                        for line in range(self._EXTERNAL_TRIP_LINES):
+                            if word & ((1 << line) | (1 << (4 + line))):
+                                self._external_trip_lines_in_use.add(line)
+                except Exception:
+                    pass
+            line_count = self._internal_trip_line_count(int(slot))
+            int_name = self._first_param_name(int(slot), 0, self._TRIPINT_NAMES)
+            if int_name is not None and line_count:
+                try:
+                    values = bridge.Device_get_ch_param(int(slot), channels, int_name)
+                    used = self._internal_trip_lines_in_use.setdefault(int(slot), set())
+                    for value in values or []:
+                        word = int(value)
+                        for line in range(line_count):
+                            if word & ((1 << line) | (1 << (line_count + line))):
+                                used.add(line)
+                except Exception:
+                    pass
+
+    def _write_group_trip_masks(self, members: list[tuple[int, int]], names: list[str], mask: int) -> bool:
+        written: list[tuple[int, int, str]] = []
+        for slot, channel in members:
+            name = self._first_param_name(slot, channel, names)
+            if name is None:
+                return False
+            try:
+                self.set_channel_param(int(slot), int(channel), name, int(mask))
+                written.append((slot, channel, name))
+            except Exception:
+                # A half-programmed line is worse than none: undo what landed.
+                for w_slot, w_channel, w_name in written:
+                    try:
+                        self.set_channel_param(int(w_slot), int(w_channel), w_name, 0)
+                    except Exception:
+                        pass
+                return False
+        return True
+
+    def _clear_group_trip_masks(self, group: frozenset[tuple[int, int]], kind: str) -> None:
+        names = self._TRIPEXT_NAMES if kind == "ext" else self._TRIPINT_NAMES
+        for slot, channel in sorted(group):
+            name = self._first_param_name(slot, channel, names)
+            if name is None:
+                continue
+            try:
+                self.set_channel_param(int(slot), int(channel), name, 0)
+            except Exception:
+                pass
+
+    def _program_group_trip_line(self, group: frozenset[tuple[int, int]]) -> str | None:
+        members = sorted(group)
+        slots = {int(s) for s, _c in members}
+        self._scan_trip_lines_in_use()
+        # Same-board groups prefer an internal line, saving the 4 crate lines
+        # for the groups that need them (mixed polarity spans two boards).
+        if len(slots) == 1:
+            slot = next(iter(slots))
+            line_count = self._internal_trip_line_count(slot)
+            if line_count and all(
+                self._first_param_name(s, c, self._TRIPINT_NAMES) for s, c in members
+            ):
+                used = self._internal_trip_lines_in_use.setdefault(slot, set())
+                for line in range(line_count):
+                    if line in used:
+                        continue
+                    mask = (1 << line) | (1 << (line_count + line))
+                    if self._write_group_trip_masks(members, self._TRIPINT_NAMES, mask):
+                        used.add(line)
+                        self._trip_line_alloc[group] = ("int", line)
+                        return "int"
+                    return None
+        if not all(self._first_param_name(s, c, self._TRIPEXT_NAMES) for s, c in members):
+            return None
+        for line in range(self._EXTERNAL_TRIP_LINES):
+            if line in self._external_trip_lines_in_use:
+                continue
+            mask = (1 << line) | (1 << (4 + line))
+            if self._write_group_trip_masks(members, self._TRIPEXT_NAMES, mask):
+                self._external_trip_lines_in_use.add(line)
+                self._trip_line_alloc[group] = ("ext", line)
+                return "ext"
+            return None
+        return None
+
+    def _free_trip_line(self, group: frozenset[tuple[int, int]], kind: str, line: int) -> None:
+        if kind == "ext":
+            self._external_trip_lines_in_use.discard(int(line))
+        else:
+            slot = next(iter(group))[0]
+            self._internal_trip_lines_in_use.get(int(slot), set()).discard(int(line))
+
+    def sync_trip_lines(self) -> None:
+        """Reconcile hardware trip-bus masks with the current link groups.
+
+        Best-effort: capability gaps and failures are recorded in
+        trip_line_status; groups without a hardware line are still covered
+        by the server watchdog and the GUI trip reaction.
+        """
+        try:
+            components = [frozenset(c) for c in self._link_group_components()]
+            desired = set(components)
+            for old_group, (kind, line) in list(self._trip_line_alloc.items()):
+                if old_group in desired:
+                    continue
+                self._clear_group_trip_masks(old_group, kind)
+                self._free_trip_line(old_group, kind, line)
+                self._trip_line_alloc.pop(old_group, None)
+            ext_count = 0
+            int_count = 0
+            uncovered = 0
+            for group in components:
+                existing = self._trip_line_alloc.get(group)
+                if existing is None:
+                    existing_kind = self._program_group_trip_line(group)
+                else:
+                    existing_kind = existing[0]
+                if existing_kind == "ext":
+                    ext_count += 1
+                elif existing_kind == "int":
+                    int_count += 1
+                else:
+                    uncovered += 1
+            parts: list[str] = []
+            if ext_count or int_count:
+                parts.append(f"hardware trip lines active: ext={ext_count} int={int_count}")
+            if uncovered:
+                parts.append(f"{uncovered} group(s) without hardware trip line (watchdog only)")
+            self.trip_line_status = "; ".join(parts)
+        except Exception as exc:
+            self.trip_line_status = f"error: {exc}"
 
     def _to_bool(self, value: Any) -> bool:
         if isinstance(value, bool):
@@ -403,6 +742,54 @@ class ClientWorker:
                 continue
         return None
 
+    _RUP_NAMES = ["RUp", "RUP"]
+    _RDOWN_NAMES = ["RDWn", "RDown", "RDWN"]
+    _PDWN_NAMES = ["PDWN", "PDwn"]
+    _RAMP_TOLERANCE = 1e-6
+    # Status bits per CAEN convention: 6 = external trip, 8 = internal trip.
+    TRIP_STATUS_MASK = (1 << 6) | (1 << 8)
+
+    def _get_numeric_param_any_strict(self, slot: int, channel: int, names: list[str]) -> float:
+        found = self._get_numeric_param_any(int(slot), int(channel), names)
+        if found is None:
+            raise RuntimeError(f"failed to read {names[0]} for channel {slot}:{channel}")
+        return float(found[0])
+
+    def _set_param_any_strict(self, slot: int, channel: int, names: list[str], value: float) -> str:
+        applied = self._set_param_any(int(slot), int(channel), names, float(value))
+        if applied is None:
+            raise RuntimeError(f"failed to write {names[0]}={value} for channel {slot}:{channel}")
+        return applied
+
+    def _read_group_ramps(self, group: list[tuple[int, int]]) -> dict[tuple[int, int], tuple[float, float]]:
+        ramps: dict[tuple[int, int], tuple[float, float]] = {}
+        for slot, channel in group:
+            rup = self._get_numeric_param_any_strict(slot, channel, self._RUP_NAMES)
+            rdown = self._get_numeric_param_any_strict(slot, channel, self._RDOWN_NAMES)
+            ramps[(slot, channel)] = (rup, rdown)
+        return ramps
+
+    def _get_pdown_value(self, slot: int, channel: int) -> Any | None:
+        bridge = self._ensure_bridge()
+        for name in self._PDWN_NAMES:
+            try:
+                values = bridge.Device_get_ch_param(int(slot), [int(channel)], name)
+                if isinstance(values, list) and values:
+                    return values[0]
+            except Exception:
+                continue
+        return None
+
+    def _set_pdown_value(self, slot: int, channel: int, value: Any) -> None:
+        last_exc: Exception | None = None
+        for name in self._PDWN_NAMES:
+            try:
+                self.set_channel_param(int(slot), int(channel), name, value)
+                return
+            except Exception as exc:
+                last_exc = exc
+        raise RuntimeError(f"failed to write PDWN for channel {slot}:{channel}") from last_exc
+
     def _channels_span_mixed_polarity(self, channels: set[tuple[int, int]]) -> bool:
         polarities = {self._slot_is_negative(int(slot)) for slot, _channel in channels}
         return len(polarities) > 1
@@ -412,40 +799,80 @@ class ClientWorker:
         if len(group) < 2:
             return {}
 
-        rup_values: list[float] = []
-        rdown_values: list[float] = []
-        for slot, channel in group:
-            rup = self._get_numeric_param_any(slot, channel, ["RUp", "RUP"])
-            if rup is not None:
-                rup_values.append(float(rup[0]))
-            rdown = self._get_numeric_param_any(slot, channel, ["RDWn", "RDown", "RDWN"])
-            if rdown is not None:
-                rdown_values.append(float(rdown[0]))
-
-        target_rup: float | None = min(rup_values) if rup_values else None
-        target_rdown: float | None = min(rdown_values) if rdown_values else None
+        ramps = self._read_group_ramps(group)
+        target_rup = min(rup for rup, _rdown in ramps.values())
+        target_rdown = min(rdown for _rup, rdown in ramps.values())
 
         # In a mixed-polarity group a joint shift runs RUp on one channel
         # against RDWn on another, so every ramp value must be identical;
         # take the slowest of all of them.
         if self._channels_span_mixed_polarity(set(group)):
-            candidates = [v for v in (target_rup, target_rdown) if v is not None]
-            if candidates:
-                target_rup = target_rdown = min(candidates)
+            target_rup = target_rdown = min(target_rup, target_rdown)
 
-        if target_rup is not None:
-            for slot, channel in group:
-                self._set_param_any(slot, channel, ["RUp", "RUP"], float(target_rup))
-        if target_rdown is not None:
-            for slot, channel in group:
-                self._set_param_any(slot, channel, ["RDWn", "RDown", "RDWN"], float(target_rdown))
+        for slot, channel in group:
+            self._set_param_any_strict(slot, channel, self._RUP_NAMES, target_rup)
+            self._set_param_any_strict(slot, channel, self._RDOWN_NAMES, target_rdown)
 
-        result: dict[str, float] = {}
-        if target_rup is not None:
-            result["rup"] = float(target_rup)
-        if target_rdown is not None:
-            result["rdown"] = float(target_rdown)
-        return result
+        return {"rup": float(target_rup), "rdown": float(target_rdown)}
+
+    def _ensure_group_ramps_synced(self, channels: set[tuple[int, int]]) -> dict[str, float] | None:
+        """Verify ramp equality across a linked group before a move.
+
+        If the read-back values drifted since link creation, re-sync the
+        whole group to the slowest value and return the applied updates;
+        return None when the group was already consistent.
+        """
+        group = sorted({(int(s), int(c)) for (s, c) in channels})
+        if len(group) < 2:
+            return None
+        ramps = self._read_group_ramps(group)
+        rup_values = [rup for rup, _rdown in ramps.values()]
+        rdown_values = [rdown for _rup, rdown in ramps.values()]
+        if self._channels_span_mixed_polarity(set(group)):
+            all_values = rup_values + rdown_values
+            consistent = max(all_values) - min(all_values) <= self._RAMP_TOLERANCE
+        else:
+            consistent = (
+                max(rup_values) - min(rup_values) <= self._RAMP_TOLERANCE
+                and max(rdown_values) - min(rdown_values) <= self._RAMP_TOLERANCE
+            )
+        if consistent:
+            return None
+        return self._sync_link_ramps(set(group))
+
+    def _sync_link_pdown(
+        self,
+        channels: set[tuple[int, int]],
+        *,
+        adopt_from: tuple[int, int],
+        strict: bool = True,
+    ) -> Any | None:
+        """Make PDWN identical across a linked group, adopting one channel's mode.
+
+        Returns the adopted mode if any channel was changed, None when the
+        group was already consistent or PDWN is unreadable. With strict=False
+        write failures are swallowed (used on power-off, which must proceed).
+        """
+        group = sorted({(int(s), int(c)) for (s, c) in channels})
+        if len(group) < 2:
+            return None
+        target = self._get_pdown_value(int(adopt_from[0]), int(adopt_from[1]))
+        if target is None:
+            return None
+        target_norm = str(target).strip().lower()
+        changed = False
+        for slot, channel in group:
+            current = self._get_pdown_value(slot, channel)
+            if current is not None and str(current).strip().lower() == target_norm:
+                continue
+            try:
+                self._set_pdown_value(slot, channel, target)
+            except Exception:
+                if strict:
+                    raise
+                continue
+            changed = True
+        return target if changed else None
 
     def apply_linked_ramp(self, slot: int, channel: int, field: str, value: float) -> dict[str, float]:
         """Propagate a rup/rdown edit across the linked group.
@@ -456,13 +883,15 @@ class ClientWorker:
         name = str(field).strip().lower()
         if name not in ("rup", "rdown"):
             raise ValueError(f"unsupported ramp field: {field}")
+        # GUI values are signed (slew convention); the group shares magnitudes.
+        magnitude = abs(float(value))
         linked = self.get_linked_channels_recursive(int(slot), int(channel))
         if self._channels_span_mixed_polarity(linked):
-            self.set_param_for_channels(linked, "RUp", float(value))
-            self.set_param_for_channels(linked, "RDWn", float(value))
-            return {"rup": float(value), "rdown": float(value)}
-        self.set_param_for_channels(linked, "RUp" if name == "rup" else "RDWn", float(value))
-        return {name: float(value)}
+            self.set_param_for_channels(linked, "RUp", magnitude)
+            self.set_param_for_channels(linked, "RDWn", magnitude)
+            return {"rup": magnitude, "rdown": magnitude}
+        self.set_param_for_channels(linked, "RUp" if name == "rup" else "RDWn", magnitude)
+        return {name: magnitude}
 
     def _get_channel_state(self, slot: int, channel: int) -> dict[str, Any]:
         key = (int(slot), int(channel))
@@ -546,18 +975,25 @@ class ClientWorker:
 
     def _validate_vset_targets_in_range(self, targets: dict[tuple[int, int], float]) -> None:
         for (slot, channel), target_vset in sorted(targets.items()):
+            target = float(target_vset)
             limits = self.fetch_channel_constraints(int(slot), int(channel))
             lo = limits.get("vset_min")
             hi = limits.get("vset_max")
-            if lo is None or hi is None:
-                continue
-            target = float(target_vset)
-            if float(lo) <= target <= float(hi):
-                continue
-            raise RuntimeError(
-                "resulted Vset out of range for "
-                f"{slot}:{channel} (target={target:.6g}, range={float(lo):.6g}..{float(hi):.6g})"
-            )
+            if lo is not None and hi is not None and not (float(lo) <= target <= float(hi)):
+                raise RuntimeError(
+                    "resulted Vset out of range for "
+                    f"{slot}:{channel} (target={target:.6g}, range={float(lo):.6g}..{float(hi):.6g})"
+                )
+            # Reject targets the hardware would clamp to SVMax; a silent
+            # clamp changes the achieved difference between linked channels.
+            svmax = self._get_numeric_param_any(int(slot), int(channel), ["SVMax", "SVMAX"])
+            if svmax is not None:
+                backend_target = abs(float(self._to_backend_voltage(int(slot), "V0Set", target)))
+                if backend_target > float(svmax[0]) + 1e-6:
+                    raise RuntimeError(
+                        "resulted Vset exceeds SVMax for "
+                        f"{slot}:{channel} (target={target:.6g}, svmax={float(svmax[0]):.6g})"
+                    )
 
     def _validate_linked_power_consistency(
         self,
@@ -588,9 +1024,31 @@ class ClientWorker:
         state["power"] = bool(enabled)
         self._channel_state[key] = state
 
-    def set_power_for_channels(self, channels: set[tuple[int, int]], enabled: bool) -> None:
-        for slot, channel in sorted({(int(s), int(c)) for (s, c) in channels}):
+    def set_power_for_channels(
+        self,
+        channels: set[tuple[int, int]],
+        enabled: bool,
+        *,
+        initiator: tuple[int, int] | None = None,
+    ) -> dict[str, Any]:
+        group = sorted({(int(s), int(c)) for (s, c) in channels})
+        info: dict[str, Any] = {"ramp_resync": None, "pdown_synced": None}
+        if len(group) > 1:
+            if enabled:
+                info["ramp_resync"] = self._ensure_group_ramps_synced(set(group))
+            else:
+                # Power-off must proceed even if the pre-checks fail.
+                try:
+                    info["ramp_resync"] = self._ensure_group_ramps_synced(set(group))
+                except Exception as exc:
+                    info["warning"] = f"ramp check skipped: {exc}"
+                adopt = initiator if initiator is not None else group[0]
+                info["pdown_synced"] = self._sync_link_pdown(
+                    set(group), adopt_from=(int(adopt[0]), int(adopt[1])), strict=False
+                )
+        for slot, channel in group:
             self._set_channel_power(slot, channel, bool(enabled))
+        return info
 
     def _execute_vset_plan(self, targets: dict[tuple[int, int], float]) -> None:
         states: dict[tuple[int, int], dict[str, Any]] = {
@@ -653,7 +1111,27 @@ class ClientWorker:
                 raise RuntimeError(f"duplicate queued modification for {slot}:{channel}")
             queued.add(key)
             state = self._get_channel_state(slot, channel)
-            self.set_channel_param(slot, channel, "V0Set", float(target_v))
+            try:
+                self.set_channel_param(slot, channel, "V0Set", float(target_v))
+            except Exception as exc:
+                # Roll already-moved channels back to their previous set
+                # values so the group does not settle at a wrong difference.
+                rollback_failed: list[str] = []
+                for r_slot, r_channel in reversed(executed):
+                    r_key = (int(r_slot), int(r_channel))
+                    try:
+                        self.set_channel_param(r_slot, r_channel, "V0Set", float(pre_vsets[r_key]))
+                        r_state = self._get_channel_state(r_slot, r_channel)
+                        r_state["vset"] = float(pre_vsets[r_key])
+                        self._channel_state[r_key] = r_state
+                    except Exception:
+                        rollback_failed.append(f"{r_slot}:{r_channel}")
+                detail = ""
+                if executed:
+                    detail = f"; rolled back {len(executed) - len(rollback_failed)}/{len(executed)} moved channels"
+                    if rollback_failed:
+                        detail += f", rollback FAILED for {', '.join(rollback_failed)}"
+                raise RuntimeError(f"V0Set write failed for {slot}:{channel}: {exc}{detail}") from exc
             state["vset"] = float(target_v)
             self._channel_state[key] = state
             executed.append(key)
@@ -769,6 +1247,11 @@ class ClientWorker:
             payload["status"] = bridge.Device_get_ch_param(slot, [channel], "Status")[0]
         except Exception:
             pass
+        if "status" in payload:
+            key = (int(slot), int(channel))
+            state = dict(self._channel_state.get(key) or {})
+            state["status"] = payload["status"]
+            self._channel_state[key] = state
         return payload
 
     def fetch_channel_settings(self, slot: int, channel: int) -> dict[str, Any]:
@@ -792,7 +1275,7 @@ class ClientWorker:
         for param_name, key in params:
             try:
                 value = bridge.Device_get_ch_param(slot, [channel], param_name)[0]
-                if param_name in ("V0Set", "SVMax"):
+                if param_name in ("V0Set", "SVMax", "RUp"):
                     value = self._to_ui_voltage(slot, param_name, value)
                 payload[key] = value
             except Exception:
@@ -807,7 +1290,8 @@ class ClientWorker:
         if "rdown" not in payload:
             for rdown_name in ("RDWn", "RDown", "RDWN"):
                 try:
-                    payload["rdown"] = bridge.Device_get_ch_param(slot, [channel], rdown_name)[0]
+                    raw = bridge.Device_get_ch_param(slot, [channel], rdown_name)[0]
+                    payload["rdown"] = self._to_ui_voltage(slot, rdown_name, raw)
                     break
                 except Exception:
                     continue
@@ -846,7 +1330,19 @@ class ClientWorker:
             self._owned_resources.discard(str(resource))
         return released
 
-    def apply_linked_vset(self, slot: int, channel: int, requested_vset: float) -> None:
+    def _group_ramping_channels(self, channels: set[tuple[int, int]]) -> list[tuple[int, int]]:
+        ramping: list[tuple[int, int]] = []
+        for slot, channel in sorted(channels):
+            status = (self._channel_state.get((int(slot), int(channel))) or {}).get("status")
+            try:
+                bits = int(status)
+            except Exception:
+                continue
+            if bits & 0b110:  # RUP or RDWN active
+                ramping.append((int(slot), int(channel)))
+        return ramping
+
+    def apply_linked_vset(self, slot: int, channel: int, requested_vset: float) -> dict[str, Any]:
         key = (int(slot), int(channel))
         current_rule = self._link_rules.get(key)
         previous_rule = current_rule
@@ -861,6 +1357,9 @@ class ClientWorker:
             targets = self._build_linked_targets(requested_values={key: float(requested_vset)})
             self._validate_vset_targets_in_range(targets)
             self._validate_linked_power_consistency(initiator=key, affected=set(targets.keys()))
+            ramp_resync = self._ensure_group_ramps_synced(set(targets.keys()))
+            pdown_synced = self._sync_link_pdown(set(targets.keys()), adopt_from=key, strict=False)
+            ramping = self._group_ramping_channels(set(targets.keys()))
             self._execute_vset_plan(targets)
         except Exception:
             if updated_rule:
@@ -869,8 +1368,9 @@ class ClientWorker:
                 else:
                     self._link_rules[key] = previous_rule
             raise
+        return {"ramp_resync": ramp_resync, "ramping": ramping, "pdown_synced": pdown_synced}
 
-    def apply_linked_offset(self, slot: int, channel: int, offset: float) -> None:
+    def apply_linked_offset(self, slot: int, channel: int, offset: float) -> dict[str, Any]:
         key = (int(slot), int(channel))
         current = self._link_rules.get(key)
         if current is None:
@@ -884,11 +1384,50 @@ class ClientWorker:
             targets = self._build_linked_targets(requested_values={key: target_vset})
             self._validate_vset_targets_in_range(targets)
             self._validate_linked_power_consistency(initiator=key, affected=set(targets.keys()))
+            ramp_resync = self._ensure_group_ramps_synced(set(targets.keys()))
+            pdown_synced = self._sync_link_pdown(set(targets.keys()), adopt_from=key, strict=False)
+            ramping = self._group_ramping_channels(set(targets.keys()))
             self._execute_vset_plan(targets)
         except Exception:
             self._link_rules[key] = previous_rule
             raise
+        return {"ramp_resync": ramp_resync, "ramping": ramping, "pdown_synced": pdown_synced}
 
     def apply_linked_power(self, slot: int, channel: int, enabled: bool) -> None:
         key = (int(slot), int(channel))
         self._set_channel_power(key[0], key[1], bool(enabled))
+
+    def check_trip_and_power_off_partners(
+        self, slot: int, channel: int, status: Any
+    ) -> list[tuple[int, int]] | None:
+        """React to a trip on a linked channel by powering off its partners.
+
+        Returns the list of partners powered off when a trip was handled
+        (possibly empty), or None when the status shows no trip or the
+        channel is not linked.
+        """
+        try:
+            bits = int(status)
+        except Exception:
+            return None
+        if not bits & self.TRIP_STATUS_MASK:
+            return None
+        key = (int(slot), int(channel))
+        # The tripped channel is off in hardware; reflect that in the cache
+        # even when it has no linked partners.
+        tripped_state = self._get_channel_state(key[0], key[1])
+        tripped_state["power"] = False
+        self._channel_state[key] = tripped_state
+        linked = self.get_linked_channels_recursive(key[0], key[1])
+        if len(linked) < 2:
+            return None
+        powered_off: list[tuple[int, int]] = []
+        for l_slot, l_channel in sorted(linked):
+            if (l_slot, l_channel) == key:
+                continue
+            state = self._get_channel_state(l_slot, l_channel)
+            if not self._to_bool(state.get("power", False)):
+                continue
+            self._set_channel_power(l_slot, l_channel, False)
+            powered_off.append((l_slot, l_channel))
+        return powered_off

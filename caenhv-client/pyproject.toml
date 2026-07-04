@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Standalone client for CAEN HV via devman, with a local-socket fire/raise interface"
 requires-python = ">=3.10"
 dependencies = [
-  "caenhv-devman-client>=0.1.0",
+  "caenhv-devman-client>=0.2.0",
 ]
 
 [project.optional-dependencies]

@@ -595,14 +595,9 @@ class MainWindow(QtWidgets.QWidget):
             widget = self._channel_widgets.get((int(slot), int(channel)))
             if widget is None:
                 continue
-            if rup_value is not None:
-                blocker_rup = QtCore.QSignalBlocker(widget.doubleSpinBoxRup)
-                _ = blocker_rup
-                widget.doubleSpinBoxRup.setValue(float(rup_value))
-            if rdown_value is not None:
-                blocker_rdown = QtCore.QSignalBlocker(widget.doubleSpinBoxRdown)
-                _ = blocker_rdown
-                widget.doubleSpinBoxRdown.setValue(float(rdown_value))
+            # The group shares magnitudes; each widget applies its own sign
+            # per the signed slew convention.
+            widget.set_ramp_values(rup=rup_value, rdwn=rdown_value)
 
     def _wire_channel_widget(self, widget: ChannelWidget) -> None:
         widget.sig_vset_requested.connect(self.sig_channel_vset_requested)

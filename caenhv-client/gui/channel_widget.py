@@ -29,6 +29,9 @@ class ChannelWidget(QtWidgets.QWidget):
         self.labelResourceName.setText(f"slot{self.slot}:ch{self.channel}")
         self._verbose_visible = True
         self._negative_polarity = False
+        self._ramp_limit_rup = 1000.0
+        self._ramp_limit_rdwn = 1000.0
+        self._apply_ramp_ranges()
         self._emit_on_arrow_step: dict[str, bool] = {
             "doubleSpinBoxVset": False,
             "doubleSpinBoxReferenceOffset": False,
@@ -320,6 +323,45 @@ class ChannelWidget(QtWidgets.QWidget):
         else:
             self.doubleSpinBoxVset.setMaximum(3000.0)
             self.doubleSpinBoxSVmax.setMaximum(3000.0)
+        self._apply_ramp_ranges()
+
+    def set_ramp_limits(self, rup_max: float | None = None, rdwn_max: float | None = None) -> None:
+        if rup_max is not None:
+            self._ramp_limit_rup = abs(float(rup_max))
+        if rdwn_max is not None:
+            self._ramp_limit_rdwn = abs(float(rdwn_max))
+        self._apply_ramp_ranges()
+
+    def _apply_ramp_ranges(self) -> None:
+        # Signed slew convention, same as Vset: the sign is the direction of
+        # signed-voltage motion the parameter governs.
+        rup_limit = float(getattr(self, "_ramp_limit_rup", 1000.0))
+        rdwn_limit = float(getattr(self, "_ramp_limit_rdwn", 1000.0))
+        if self._negative_polarity:
+            self.doubleSpinBoxRup.setRange(-rup_limit, 0.0)
+            self.doubleSpinBoxRdown.setRange(0.0, rdwn_limit)
+        else:
+            self.doubleSpinBoxRup.setRange(0.0, rup_limit)
+            self.doubleSpinBoxRdown.setRange(-rdwn_limit, 0.0)
+
+    def _signed_rup(self, value: object) -> float:
+        magnitude = abs(float(value))
+        return -magnitude if self._negative_polarity else magnitude
+
+    def _signed_rdwn(self, value: object) -> float:
+        magnitude = abs(float(value))
+        return magnitude if self._negative_polarity else -magnitude
+
+    def set_ramp_values(self, rup: float | None = None, rdwn: float | None = None) -> None:
+        """Set ramp spinboxes, normalizing signs to this channel's polarity."""
+        if rup is not None:
+            blocker = QtCore.QSignalBlocker(self.doubleSpinBoxRup)
+            _ = blocker
+            self.doubleSpinBoxRup.setValue(self._signed_rup(rup))
+        if rdwn is not None:
+            blocker = QtCore.QSignalBlocker(self.doubleSpinBoxRdown)
+            _ = blocker
+            self.doubleSpinBoxRdown.setValue(self._signed_rdwn(rdwn))
 
     def set_voltage_limits(self, *, vset_min: float | None = None, vset_max: float | None = None, svmax_min: float | None = None, svmax_max: float | None = None) -> None:
         if vset_min is not None:
@@ -446,9 +488,9 @@ class ChannelWidget(QtWidgets.QWidget):
             enabled = bool(int(value)) if isinstance(value, (int, float, str)) else bool(value)
             self.checkBoxEnable.setChecked(enabled)
         if "rup" in payload:
-            self.doubleSpinBoxRup.setValue(float(payload["rup"]))
+            self.doubleSpinBoxRup.setValue(self._signed_rup(payload["rup"]))
         if "rdown" in payload:
-            self.doubleSpinBoxRdown.setValue(float(payload["rdown"]))
+            self.doubleSpinBoxRdown.setValue(self._signed_rdwn(payload["rdown"]))
         if "trip" in payload:
             self.doubleSpinBoxTrip.setValue(float(payload["trip"]))
         if "svmax" in payload:
