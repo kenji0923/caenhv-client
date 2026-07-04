@@ -13,6 +13,11 @@ except Exception:
     from main_window import MainWindow
 
 try:
+    from .local_server import GuiLocalServer
+except Exception:
+    from local_server import GuiLocalServer
+
+try:
     from ..worker.client_worker import ClientWorker
 except Exception:
     from worker.client_worker import ClientWorker
@@ -34,6 +39,12 @@ class StandaloneMainWindow(MainWindow):
         self._worker = ClientWorker()
         self._wire_standalone_slots()
         self._load_connection_inputs()
+        self._local_server = GuiLocalServer(parent=self)
+        self._local_server.sig_show_requested.connect(self._slot_show_window)
+        if not self._local_server.start():
+            self.append_response_log(
+                f"WARNING: local IPC server failed to listen on '{self._local_server.server_name()}'"
+            )
         app = QtWidgets.QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
@@ -82,7 +93,17 @@ class StandaloneMainWindow(MainWindow):
                 int(self.spinBoxSettingsCheckIntervalSec.value()),
             )
 
+    @QtCore.pyqtSlot()
+    def _slot_show_window(self) -> None:
+        # Show and raise without activateWindow() so the caller (e.g. BLACS)
+        # keeps keyboard focus.
+        self.setAttribute(QtCore.Qt.WA_ShowWithoutActivating, True)
+        self.setWindowState(self.windowState() & ~QtCore.Qt.WindowMinimized)
+        self.show()
+        self.raise_()
+
     def closeEvent(self, event) -> None:
+        self._local_server.stop()
         self._save_connection_inputs()
         self._poll_timer.stop()
         try:

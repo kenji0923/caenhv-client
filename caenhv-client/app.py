@@ -6,6 +6,11 @@ from pathlib import Path
 from PyQt5 import QtGui, QtWidgets
 
 try:
+    from .communicator import notify_gui
+except Exception:
+    from communicator import notify_gui
+
+try:
     from .gui.standalone_window import StandaloneMainWindow
 except Exception:
     from gui.standalone_window import StandaloneMainWindow
@@ -19,6 +24,9 @@ def main() -> int:
     except Exception:
         pass
     app = QtWidgets.QApplication(sys.argv)
+    if notify_gui():
+        print("caenhv-client is already running; raised the existing window.")
+        return 0
     root_dir = Path(__file__).resolve().parents[1]
     resources_dir = Path(__file__).resolve().parent / "resources"
     app_icon = QtGui.QIcon()
