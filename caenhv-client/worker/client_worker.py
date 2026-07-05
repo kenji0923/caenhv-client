@@ -745,7 +745,52 @@ class ClientWorker:
     _RUP_NAMES = ["RUp", "RUP"]
     _RDOWN_NAMES = ["RDWn", "RDown", "RDWN"]
     _PDWN_NAMES = ["PDWN", "PDwn"]
+    # CAEN-standard PDWn enum when the device does not expose option names.
+    _PDWN_FALLBACK_BY_INDEX = {0: "KILL", 1: "RAMP"}
     _RAMP_TOLERANCE = 1e-6
+
+    def _pdown_options(self, slot: int, channel: int) -> list[str] | None:
+        """Enum option names in device index order, upper-cased; None if absent."""
+        bridge = self._ensure_bridge()
+        if not hasattr(bridge, "Device_get_ch_param_prop"):
+            return None
+        for name in self._PDWN_NAMES:
+            try:
+                prop = bridge.Device_get_ch_param_prop(slot, channel, name)
+            except Exception:
+                continue
+            opts = None
+            for key in ("enum", "Enum", "options"):
+                opts = prop.get(key) if isinstance(prop, dict) else getattr(prop, key, None)
+                if opts:
+                    break
+            if opts:
+                return [str(o).strip().upper() for o in opts]
+        return None
+
+    def _pdown_index_to_name(self, slot: int, channel: int, value: Any) -> str:
+        try:
+            idx = int(value)
+        except (TypeError, ValueError):
+            return str(value).strip().upper()  # already a mode name
+        options = self._pdown_options(slot, channel)
+        if options and 0 <= idx < len(options):
+            return options[idx]
+        return self._PDWN_FALLBACK_BY_INDEX.get(idx, str(value))
+
+    def _pdown_name_to_value(self, slot: int, channel: int, mode: Any) -> Any:
+        key = str(mode).strip().upper()
+        options = self._pdown_options(slot, channel)
+        if options and key in options:
+            return options.index(key)
+        for idx, name in self._PDWN_FALLBACK_BY_INDEX.items():
+            if name == key:
+                return idx
+        return mode  # last resort: pass through unchanged
+
+    def set_pdown_mode(self, slot: int, channel: int, mode: str) -> None:
+        """Write PDWn as the device's numeric enum value for the mode name."""
+        self._set_pdown_value(int(slot), int(channel), self._pdown_name_to_value(int(slot), int(channel), mode))
     # Status bits per CAEN convention: 6 = external trip, 8 = internal trip.
     TRIP_STATUS_MASK = (1 << 6) | (1 << 8)
 
@@ -1294,6 +1339,14 @@ class ClientWorker:
                 try:
                     raw = bridge.Device_get_ch_param(slot, [channel], rdown_name)[0]
                     payload["rdown"] = self._to_ui_voltage(slot, rdown_name, raw)
+                    break
+                except Exception:
+                    continue
+        if "pdown" not in payload:
+            for pdown_name in self._PDWN_NAMES:
+                try:
+                    raw = bridge.Device_get_ch_param(slot, [channel], pdown_name)[0]
+                    payload["pdown"] = self._pdown_index_to_name(slot, channel, raw)
                     break
                 except Exception:
                     continue

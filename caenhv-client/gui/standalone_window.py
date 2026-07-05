@@ -166,7 +166,7 @@ class StandaloneMainWindow(MainWindow):
             elif field == "pdown":
                 linked = self._worker.get_linked_channels_recursive(slot, channel)
                 for l_slot, l_channel in sorted(linked):
-                    self._worker.set_channel_param(int(l_slot), int(l_channel), "PDWN", str(value))
+                    self._worker.set_pdown_mode(int(l_slot), int(l_channel), str(value))
             else:
                 backend = {"iset": "I0Set", "trip": "Trip", "svmax": "SVMax"}.get(field)
                 if backend is None:
@@ -518,10 +518,9 @@ class StandaloneMainWindow(MainWindow):
         if field == "pdown":
             blocker = QtCore.QSignalBlocker(widget.comboBoxPdownMode)
             _ = blocker
-            text = str(remote_value)
-            if widget.comboBoxPdownMode.findText(text) < 0:
-                widget.comboBoxPdownMode.addItem(text)
-            widget.comboBoxPdownMode.setCurrentText(text)
+            idx = widget.comboBoxPdownMode.findText(str(remote_value).strip(), QtCore.Qt.MatchFixedString)
+            if idx >= 0:
+                widget.comboBoxPdownMode.setCurrentIndex(idx)
 
     def _handle_vset_remote_choice(
         self,
@@ -631,7 +630,7 @@ class StandaloneMainWindow(MainWindow):
                     if field == "power":
                         self._worker.set_channel_param(int(slot), int(channel), "Pw", int(local_value))
                     elif field == "pdown":
-                        self._worker.set_channel_param(int(slot), int(channel), "PDWN", str(local_value))
+                        self._worker.set_pdown_mode(int(slot), int(channel), str(local_value))
                     elif field == "trip":
                         self._worker.set_channel_param(int(slot), int(channel), "Trip", float(local_value))
                     elif field == "svmax":
@@ -1112,7 +1111,7 @@ class StandaloneMainWindow(MainWindow):
             linked = self._worker.get_linked_channels_recursive(slot, channel)
             if len(linked) > 1:
                 for l_slot, l_channel in sorted(linked):
-                    self._worker.set_channel_param(int(l_slot), int(l_channel), "PDWN", mode)
+                    self._worker.set_pdown_mode(int(l_slot), int(l_channel), mode)
                 for l_slot, l_channel in sorted(linked):
                     if (int(l_slot), int(l_channel)) == (int(slot), int(channel)):
                         continue
@@ -1123,7 +1122,7 @@ class StandaloneMainWindow(MainWindow):
                     f"pdown changed propagated count={len(linked)} initiator={slot}:{channel} mode={mode}"
                 )
             else:
-                self._worker.set_channel_param(slot, channel, "PDWN", mode)
+                self._worker.set_pdown_mode(slot, channel, mode)
                 self.append_response_log(f"pdown changed slot={slot} ch={channel} mode={mode}")
         except Exception as exc:
             self.append_response_log(f"ERROR: {exc}")
