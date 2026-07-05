@@ -78,14 +78,17 @@ Purpose: let labscript set HV values programmatically. The GUI is the single gat
 Control is gated on a token: it works only when `CAENHV_CLIENT_TCP_TOKEN` is set on the GUI (in addition to `CAENHV_CLIENT_TCP_PORT`). With no token, the channel stays show/raise-only.
 
 ```python
-from caenhv_client_python import set_vset, set_offset, set_power, set_param, get_channel
+from caenhv_client_python import RemoteClient
 
-kw = dict(host="hv-pc.lab", port=50251, token="labsecret")   # or via CAENHV_CLIENT_REMOTE + CAENHV_CLIENT_TCP_TOKEN
-set_vset(0, 0, 5.0, **kw)               # linked + safeguarded
-set_power(0, 0, True, **kw)             # linked groups: applied to the whole group
-set_param(0, 0, "rup", 10.0, **kw)      # rup, rdown, iset, trip, svmax, pdown
-values = get_channel(0, 0, **kw)        # readings + settings
+hv = RemoteClient("hv-pc.lab", 50251, token="labsecret")   # or RemoteClient.from_env()
+hv.set_vset(0, 0, 5.0)               # linked + safeguarded
+hv.set_power(0, 0, True)             # linked groups: applied to the whole group
+hv.set_param(0, 0, "rup", 10.0)      # rup, rdown, iset, trip, svmax, pdown
+values = hv.get_channel(0, 0)        # readings + settings
+hv.raise_window()                    # optional: bring the GUI forward
 ```
+
+Module-level functions (`set_vset(..., host=, port=, token=)` etc.) are also available for one-off calls.
 
 A safeguard rejection (e.g. a target exceeding SVMax) comes back as a `RuntimeError` carrying the reason, and nothing is moved.
 

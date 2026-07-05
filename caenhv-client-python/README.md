@@ -21,19 +21,25 @@ notify_gui()    # raise only; returns False if the GUI is not running
 ```
 
 Remote HV control (the GUI must have `CAENHV_CLIENT_TCP_PORT` and a
-`CAENHV_CLIENT_TCP_TOKEN` set, and be running on the target host):
+`CAENHV_CLIENT_TCP_TOKEN` set, and be running on the target host).
+
+Recommended — a bound client, set host/port/token once:
 
 ```python
-from caenhv_client_python import set_vset, set_power, get_channel
+from caenhv_client_python import RemoteClient
 
-kw = dict(host="hv-pc", port=50251, token="labsecret")   # or CAENHV_CLIENT_REMOTE / _TCP_TOKEN env
-set_vset(0, 0, 5.0, **kw)          # slot 0, channel 0 -> 5.0 V (linked+safeguarded)
-set_power(0, 0, True, **kw)
-print(get_channel(0, 0, **kw))     # readings + settings
-
-# set_offset, and set_param(name in {rup,rdown,iset,trip,svmax,pdown}) also available.
-# Any safeguard rejection (e.g. exceeding SVMax) raises RuntimeError with the reason.
+hv = RemoteClient("hv-pc", 50251, token="labsecret")   # or RemoteClient.from_env()
+hv.set_vset(0, 0, 5.0)          # slot 0, channel 0 -> 5.0 V (linked + safeguarded)
+hv.set_power(0, 0, True)
+print(hv.get_channel(0, 0))     # readings + settings
+hv.set_param(0, 0, "rup", 10.0) # rup, rdown, iset, trip, svmax, pdown
+hv.raise_window()               # bring the GUI forward (no focus steal)
 ```
+
+The module-level functions (`set_vset`, `set_power`, `get_channel`,
+`set_offset`, `set_param`, `send_command`) remain available if you prefer
+passing `host=`, `port=`, `token=` per call. Any safeguard rejection (e.g.
+exceeding SVMax) raises `RuntimeError` with the reason, and nothing moves.
 
 Remote hosts: with `fire_gui(host="hv-pc", port=50251)` (or
 `CAENHV_CLIENT_REMOTE=hv-pc:50251`) the show request goes over TCP to a GUI

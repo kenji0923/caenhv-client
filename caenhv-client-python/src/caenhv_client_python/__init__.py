@@ -46,6 +46,7 @@ __all__ = [
     "ENV_REMOTE",
     "ENV_REMOTE_TOKEN",
     "ENV_SERVER_NAME",
+    "RemoteClient",
     "SHOW_COMMAND",
     "default_launch_cmd",
     "default_popen_kwargs",
@@ -329,3 +330,60 @@ def set_param(slot: int, ch: int, name: str, value, **kwargs) -> dict:
     return send_command(
         {"cmd": "set_param", "slot": int(slot), "ch": int(ch), "name": str(name), "value": value}, **kwargs
     )
+
+
+class RemoteClient:
+    """Bound client for a caenhv-client GUI: set host/port/token once.
+
+    >>> hv = RemoteClient("192.168.1.2", 50251, token="FanLabAdmin")
+    >>> hv.set_vset(0, 0, 5.0)
+    >>> hv.get_channel(0, 0)
+    >>> hv.raise_window()
+
+    All methods mirror the module-level functions but reuse the connection
+    details. Safeguard rejections (e.g. exceeding SVMax) raise RuntimeError.
+    """
+
+    def __init__(self, host: str, port: int, token: str | None = None, *, timeout: float = 2.0) -> None:
+        self.host = str(host)
+        self.port = int(port)
+        self.token = token if token is not None else os.environ.get(ENV_REMOTE_TOKEN, "").strip()
+        self.timeout = float(timeout)
+
+    @classmethod
+    def from_env(cls, *, timeout: float = 2.0) -> "RemoteClient":
+        """Build from CAENHV_CLIENT_REMOTE=host:port and CAENHV_CLIENT_TCP_TOKEN."""
+        remote = _remote_from_env()
+        if remote is None:
+            raise ValueError(f"set {ENV_REMOTE}=host:port (or pass host/port explicitly)")
+        host, port = remote
+        return cls(host, port, timeout=timeout)
+
+    def __repr__(self) -> str:
+        gated = "token" if self.token else "no-token"
+        return f"RemoteClient({self.host}:{self.port}, {gated})"
+
+    def _kw(self) -> dict:
+        return {"host": self.host, "port": self.port, "token": self.token, "timeout": self.timeout}
+
+    def send_command(self, cmd: dict) -> dict:
+        return send_command(cmd, **self._kw())
+
+    def get_channel(self, slot: int, ch: int) -> dict:
+        return get_channel(slot, ch, **self._kw())
+
+    def set_vset(self, slot: int, ch: int, value: float) -> dict:
+        return set_vset(slot, ch, value, **self._kw())
+
+    def set_offset(self, slot: int, ch: int, value: float) -> dict:
+        return set_offset(slot, ch, value, **self._kw())
+
+    def set_power(self, slot: int, ch: int, on: bool) -> dict:
+        return set_power(slot, ch, on, **self._kw())
+
+    def set_param(self, slot: int, ch: int, name: str, value) -> dict:
+        return set_param(slot, ch, name, value, **self._kw())
+
+    def raise_window(self) -> bool:
+        """Raise the GUI window if reachable (no launch). Returns success."""
+        return notify_gui(host=self.host, port=self.port, token=self.token, timeout=self.timeout)
