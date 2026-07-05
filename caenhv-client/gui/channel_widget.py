@@ -498,7 +498,9 @@ class ChannelWidget(QtWidgets.QWidget):
         if "iset" in payload and hasattr(self, "doubleSpinBoxIset"):
             self.doubleSpinBoxIset.setValue(float(payload["iset"]))
         if "pdown" in payload:
-            text = str(payload["pdown"])
-            if self.comboBoxPdownMode.findText(text) < 0:
-                self.comboBoxPdownMode.addItem(text)
-            self.comboBoxPdownMode.setCurrentText(text)
+            # Only select an existing mode (case-insensitive); never add raw
+            # device values (e.g. an enum index like "0") to the RAMP/KILL list.
+            text = str(payload["pdown"]).strip()
+            idx = self.comboBoxPdownMode.findText(text, QtCore.Qt.MatchFixedString)
+            if idx >= 0:
+                self.comboBoxPdownMode.setCurrentIndex(idx)

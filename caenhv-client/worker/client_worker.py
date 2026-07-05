@@ -1297,13 +1297,6 @@ class ClientWorker:
                     break
                 except Exception:
                     continue
-        if "pdown" not in payload:
-            for pdown_name in self._PDWN_NAMES:
-                try:
-                    payload["pdown"] = bridge.Device_get_ch_param(slot, [channel], pdown_name)[0]
-                    break
-                except Exception:
-                    continue
         self.update_cached_channel_settings(slot, channel, payload)
         return payload
 
