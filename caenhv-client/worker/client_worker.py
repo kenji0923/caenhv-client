@@ -410,6 +410,13 @@ class ClientWorker:
             return None
         return float(current[1])
 
+    def link_relationships(self) -> dict[str, dict[str, Any]]:
+        """All active links as {source 'slot:ch': {reference, offset}}."""
+        return {
+            f"{s[0]}:{s[1]}": {"reference": f"{r[0]}:{r[1]}", "offset": float(o)}
+            for s, (r, o) in self._link_rules.items()
+        }
+
     def get_link_reference(self, slot: int, channel: int) -> tuple[int, int] | None:
         key = (int(slot), int(channel))
         current = self._link_rules.get(key)
@@ -463,6 +470,11 @@ class ClientWorker:
         this client is closed. Failures are recorded in link_push_status for
         the UI to report; they never break the local link operation.
         """
+        # Never issue a request while disconnected: the bridge auto-reconnects
+        # on any call, which would silently re-register this client after an
+        # explicit disconnect and block the next connect.
+        if not self._connected:
+            return
         try:
             bridge = self._ensure_bridge()
             if not hasattr(bridge, "set_link_groups"):

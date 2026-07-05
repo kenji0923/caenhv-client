@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt5 import QtCore, QtWidgets, uic
+from PyQt5 import QtCore, QtGui, QtWidgets, uic
 
 
 class ChannelWidget(QtWidgets.QWidget):
@@ -61,36 +61,73 @@ class ChannelWidget(QtWidgets.QWidget):
         self._wire_signals()
 
     def _setup_readout_widths(self) -> None:
-        metrics = self.labelVmon.fontMetrics()
-        name_width = metrics.horizontalAdvance("slotXX:chXX") + 10
+        # Bold, slightly larger readout font; set BEFORE measuring widths so
+        # the fixed widths account for the actual rendered text.
+        readout_font = QtGui.QFont(self.labelVmon.font())
+        readout_font.setBold(True)
+        readout_font.setPointSize(readout_font.pointSize() + 1)
+        for label in (self.labelStatus, self.labelVmon, self.labelImon):
+            label.setFont(readout_font)
+        metrics = QtGui.QFontMetrics(readout_font)
         label_min_width = metrics.horizontalAdvance("CHANNELXX") + 16
         reference_width = metrics.horizontalAdvance("XX:CHANNELXX") + 20
-        status_width = metrics.horizontalAdvance("ON|RDOWN") + 12
-        vmon_width = metrics.horizontalAdvance("-0000.0 V") + 10
-        imon_width = metrics.horizontalAdvance("000.00 uA") + 10
-        self.labelResourceName.setMinimumWidth(name_width)
-        self.labelResourceName.setMaximumWidth(name_width)
-        self.lineEditLabel.setMinimumWidth(label_min_width)
-        self.lineEditLabel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-        self.comboBoxReference.setMinimumWidth(reference_width)
-        self.comboBoxReference.setMaximumWidth(reference_width)
-        self.comboBoxReference.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        status_width = metrics.horizontalAdvance("ON|RUP|RDWN") + 12
+        # slotX:chY sizes to content so it pairs tightly with the name field.
+        self.labelResourceName.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed)
+        self.labelResourceName.setMinimumWidth(0)
+        self.labelResourceName.setMaximumWidth(16777215)
+        # Name field and reference selector expand together, equal widths.
+        expand_min = max(label_min_width, reference_width)
+        for widget in (self.lineEditLabel, self.comboBoxReference):
+            policy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            policy.setHorizontalStretch(1)
+            widget.setSizePolicy(policy)
+            widget.setMinimumWidth(expand_min)
+            widget.setMaximumWidth(16777215)
         self.labelStatus.setMinimumWidth(status_width)
         self.labelStatus.setMaximumWidth(status_width)
-        self.labelVmon.setMinimumWidth(vmon_width)
-        self.labelVmon.setMaximumWidth(vmon_width)
-        self.labelImon.setMinimumWidth(imon_width)
-        self.labelImon.setMaximumWidth(imon_width)
+        # Value labels hug their content so the gap to the next group stays a
+        # constant, tight layout spacing regardless of the value's magnitude.
+        for label in (self.labelVmon, self.labelImon):
+            label.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed)
+            label.setMinimumWidth(0)
+            label.setMaximumWidth(16777215)
         self.labelStatus.setAlignment(QtCore.Qt.AlignCenter)
-        self.labelVmon.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        self.labelImon.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self.labelVmon.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        self.labelImon.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        self._apply_status_style(None)
+
+    # Electrical fault bits: OVC, OVV, UNV, external/internal trip, MAXV, ILOCK.
+    _STATUS_FAULT_MASK = (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 11)
+    _STATUS_ON_BIT = 1 << 0
+
+    def _apply_status_style(self, value: object) -> None:
+        # Color the status box: red on any fault, orange when ON (powered =
+        # warning), green when OFF (unpowered = likely safe).
+        try:
+            bits = int(value)
+        except (TypeError, ValueError):
+            bg, fg = "#7f8c8d", "white"  # unknown / not yet read
+        else:
+            if bits & self._STATUS_FAULT_MASK:
+                bg, fg = "#c0392b", "white"      # red
+            elif bits & self._STATUS_ON_BIT:
+                bg, fg = "#e67e22", "black"       # orange
+            else:
+                bg, fg = "#27ae60", "white"       # green
+        self.labelStatus.setStyleSheet(
+            f"QLabel {{ background-color: {bg}; color: {fg}; font-weight: bold;"
+            " border: 1px solid #444; padding: 1px 4px; }"
+        )
 
     def _format_float(self, value: object, unit: str, apply_polarity: bool = True) -> str:
         try:
             num = float(value)
             if apply_polarity and self._negative_polarity:
                 num = -abs(num)
-            return f"{num:0.2f} {unit}"
+            # Use the typographic minus sign (U+2212); the ASCII hyphen is
+            # too small/faint next to the digits.
+            return f"{num:0.2f} {unit}".replace("-", "−")
         except Exception:
             return f"{value} {unit}"
 
@@ -379,11 +416,17 @@ class ChannelWidget(QtWidgets.QWidget):
         _ = blocker
         self.comboBoxReference.clear()
         self.comboBoxReference.addItem("None", None)
+        tooltip_lines = ["Reference channel — available:"]
         for ref_slot, ref_channel, ref_label in options:
             key = f"{int(ref_slot)}:{int(ref_channel)}"
             label_text = str(ref_label).strip()
             display = key if not label_text else f"{int(ref_slot)}:{label_text}"
             self.comboBoxReference.addItem(display, key)
+            tooltip_lines.append(f"{key}" + (f"  ({label_text})" if label_text else ""))
+        # Hover the selector to see every reference channel with its full label.
+        self.comboBoxReference.setToolTip(
+            "\n".join(tooltip_lines) if len(tooltip_lines) > 1 else "No reference channels available"
+        )
         self.set_reference_key(current_key)
 
     def set_reference_key(self, key: str | None) -> None:
@@ -464,6 +507,7 @@ class ChannelWidget(QtWidgets.QWidget):
             self.labelImon.setText(self._format_float(payload["imon"], "uA", apply_polarity=False))
         if "status" in payload:
             self.labelStatus.setText(self._format_status(payload["status"]))
+            self._apply_status_style(payload["status"])
 
     def apply_settings(self, payload: dict) -> None:
         blockers = [

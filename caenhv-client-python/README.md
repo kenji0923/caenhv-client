@@ -48,6 +48,15 @@ hv.get_status(0, 0)        # int, CAEN Status bitmask
 hv.get_param(0, 0, "svmax")  # rup, rdown, iset, trip, svmax, pdown
 ```
 
+Channel-link relationship and offset:
+
+```python
+hv.get_link(0, 1)          # {'reference': '0:0', 'offset': -200.0} (or None when unlinked)
+hv.get_offset(0, 1)        # -200.0
+hv.set_offset(0, 1, -150.0)  # change the relative level (linked + safeguarded)
+hv.get_links()             # {'0:1': {'reference': '0:0', 'offset': -200.0}, ...} for the whole crate
+```
+
 For several fields at once, `get_channel(0, 0)` returns them all in one
 round-trip: keys `vset, vmon, imon, power, status, rup, rdown, iset, trip,
 svmax, pdown, label` (a key is absent if that parameter could not be read).

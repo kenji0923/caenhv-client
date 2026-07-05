@@ -124,6 +124,23 @@ class StandaloneMainWindow(MainWindow):
             values.update(snap)
             self.on_channel_updated(slot, channel, snap)
             return {"status": "ok", "slot": slot, "ch": channel, "values": values}
+        if name == "get_link":
+            slot, channel = int(cmd["slot"]), int(cmd["ch"])
+            reference = self._worker.get_link_reference(slot, channel)
+            offset = self._worker.get_link_offset(slot, channel)
+            return {
+                "status": "ok",
+                "slot": slot,
+                "ch": channel,
+                "reference": (f"{reference[0]}:{reference[1]}" if reference else None),
+                "offset": offset,
+            }
+        if name == "get_links":
+            return {
+                "status": "ok",
+                "links": self._worker.link_relationships(),
+                "groups": self._worker.link_groups(),
+            }
         if name == "set_vset":
             slot, channel, value = int(cmd["slot"]), int(cmd["ch"]), float(cmd["value"])
             result = self._worker.apply_linked_vset(slot, channel, value)

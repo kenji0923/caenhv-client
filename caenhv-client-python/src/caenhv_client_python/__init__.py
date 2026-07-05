@@ -53,6 +53,9 @@ __all__ = [
     "fire_gui",
     "get_channel",
     "get_imon",
+    "get_link",
+    "get_links",
+    "get_offset",
     "get_param",
     "get_power",
     "get_server_name",
@@ -319,6 +322,26 @@ def get_channel(slot: int, ch: int, **kwargs) -> dict:
     return send_command({"cmd": "get", "slot": int(slot), "ch": int(ch)}, **kwargs)["values"]
 
 
+def get_link(slot: int, ch: int, **kwargs) -> dict:
+    """Return the channel's link relationship: {'reference', 'offset'}.
+
+    'reference' is the 'slot:ch' string this channel is linked to (or None),
+    'offset' its relative level in volts (or None when unlinked).
+    """
+    reply = send_command({"cmd": "get_link", "slot": int(slot), "ch": int(ch)}, **kwargs)
+    return {"reference": reply.get("reference"), "offset": reply.get("offset")}
+
+
+def get_offset(slot: int, ch: int, **kwargs):
+    """Return the channel's link offset in volts, or None when unlinked."""
+    return get_link(slot, ch, **kwargs)["offset"]
+
+
+def get_links(**kwargs) -> dict:
+    """Return every link as {'slot:ch': {'reference', 'offset'}}."""
+    return send_command({"cmd": "get_links"}, **kwargs)["links"]
+
+
 def set_vset(slot: int, ch: int, value: float, **kwargs) -> dict:
     return send_command({"cmd": "set_vset", "slot": int(slot), "ch": int(ch), "value": float(value)}, **kwargs)
 
@@ -473,6 +496,15 @@ class RemoteClient:
 
     def get_param(self, slot: int, ch: int, name: str):
         return get_param(slot, ch, name, **self._kw())
+
+    def get_link(self, slot: int, ch: int) -> dict:
+        return get_link(slot, ch, **self._kw())
+
+    def get_offset(self, slot: int, ch: int):
+        return get_offset(slot, ch, **self._kw())
+
+    def get_links(self) -> dict:
+        return get_links(**self._kw())
 
     def raise_window(self) -> bool:
         """Raise the GUI window if reachable (no launch). Returns success."""
