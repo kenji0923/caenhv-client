@@ -13,9 +13,9 @@ except Exception:
     from main_window import MainWindow
 
 try:
-    from .local_server import GuiLocalServer
+    from .local_server import GuiLocalServer, GuiTcpShowServer
 except Exception:
-    from local_server import GuiLocalServer
+    from local_server import GuiLocalServer, GuiTcpShowServer
 
 try:
     from ..worker.client_worker import ClientWorker
@@ -48,6 +48,17 @@ class StandaloneMainWindow(MainWindow):
             self.append_response_log(
                 f"WARNING: local IPC server failed to listen on '{self._local_server.server_name()}'"
             )
+        self._tcp_show_server = GuiTcpShowServer.from_environment(parent=self)
+        if self._tcp_show_server is not None:
+            self._tcp_show_server.sig_show_requested.connect(self._slot_show_window)
+            if self._tcp_show_server.start():
+                self.append_response_log(
+                    f"remote show listener on {self._tcp_show_server.description()}"
+                )
+            else:
+                self.append_response_log(
+                    f"WARNING: remote show listener failed to bind {self._tcp_show_server.description()}"
+                )
         app = QtWidgets.QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
@@ -106,6 +117,8 @@ class StandaloneMainWindow(MainWindow):
         self.raise_()
 
     def closeEvent(self, event) -> None:
+        if self._tcp_show_server is not None:
+            self._tcp_show_server.stop()
         self._local_server.stop()
         self._save_connection_inputs()
         self._poll_timer.stop()

@@ -51,4 +51,5 @@ The standalone GUI listens on a `QLocalServer` (Windows: named pipe `\\.\pipe\<n
 - On `show`, the window is shown, un-minimized, and raised — without taking keyboard focus from the caller.
 - Single instance: a second `caenhv-client` invocation that reaches a live server forwards `show` and exits.
 - Stale sockets (POSIX crash leftovers) are reclaimed with `QLocalServer.removeServer` before listening.
-- Client side: `caenhv_client.communicator` provides `fire_gui()` (raise if running, else launch detached) and `notify_gui()` (raise only). It uses `QLocalSocket`, with a plain `AF_UNIX` fallback on POSIX when PyQt5 is unavailable.
+- Client side: the `caenhv-client-python` package (re-exported by `caenhv_client.communicator`) provides `fire_gui()` (raise if running, else launch detached) and `notify_gui()` (raise only), using stdlib Unix-socket / named-pipe transports with QLocalSocket as optional fallback.
+- Remote hosts: an opt-in TCP listener (`CAENHV_CLIENT_TCP_PORT`, with bind-address and shared-token options) accepts the same one-line protocol from other machines, replying `ok` on acceptance. Show/raise only, never HV control; remote launch is impossible by design — the GUI is expected to auto-start at login on its host.

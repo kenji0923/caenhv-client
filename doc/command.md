@@ -49,6 +49,28 @@ notify_gui()    # raise only; returns False if the GUI is not running
 
 If the GUI executable is not on PATH, set `CAENHV_CLIENT_COMMAND` to its full path (or a command line). No PyQt5 is required on any platform (Unix-socket / named-pipe transport; QLocalSocket is only an optional fallback). Inside this repo, `caenhv_client.communicator` is a shim re-exporting the same functions.
 
+## Fire the GUI on a REMOTE host
+
+Purpose: let labscript on one machine raise the GUI running on another machine (e.g. the HV control PC). Show/raise only — this channel can never change HV state, and remote *launch* is impossible: keep the GUI auto-started at login on its host (put the Start-menu shortcut into `shell:startup`).
+
+On the GUI host (opt-in, disabled by default):
+
+```sh
+set CAENHV_CLIENT_TCP_PORT=50251        # enables the TCP listener
+set CAENHV_CLIENT_TCP_BIND=0.0.0.0      # optional: restrict interface
+set CAENHV_CLIENT_TCP_TOKEN=labsecret   # optional: shared token
+```
+
+On the calling machine:
+
+```python
+from caenhv_client_python import fire_gui
+fire_gui(host="hv-pc.lab", port=50251, token="labsecret")
+# or via env: CAENHV_CLIENT_REMOTE=hv-pc.lab:50251, CAENHV_CLIENT_TCP_TOKEN=labsecret
+```
+
+The GUI acknowledges accepted requests, so a wrong token or unreachable host is reported to the caller (`notify_gui` returns False; `fire_gui` raises with instructions).
+
 Quick check from a shell:
 
 ```sh
