@@ -38,9 +38,14 @@ def _find_target() -> list[str]:
     return [interpreter, "-m", "caenhv_client"]
 
 
-def _icon_path() -> Path | None:
+def _icon_location() -> str | None:
+    if getattr(sys, "frozen", False):
+        # PyInstaller onefile: package files live in a temp dir that is
+        # deleted on exit, so a shortcut must not reference them. The exe
+        # itself carries the embedded icon.
+        return f"{sys.executable},0"
     icon = Path(__file__).resolve().parent / "resources" / "caenhv-client.ico"
-    return icon if icon.exists() else None
+    return str(icon) if icon.exists() else None
 
 
 def install() -> Path:
@@ -53,7 +58,7 @@ def install() -> Path:
     if len(target) > 1:
         lines.append("$s.Arguments = '{}'".format(" ".join(target[1:])))
     lines.append("$s.WorkingDirectory = '{}'".format(Path(target[0]).parent))
-    icon = _icon_path()
+    icon = _icon_location()
     if icon is not None:
         lines.append("$s.IconLocation = '{}'".format(icon))
     lines.append("$s.Save()")
