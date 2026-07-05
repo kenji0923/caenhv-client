@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 
 from PyQt5 import QtCore, QtNetwork
@@ -9,7 +10,7 @@ try:
 except Exception:
     from communicator import get_server_name
 
-_MAX_COMMAND_BYTES = 1024
+_MAX_COMMAND_BYTES = 8192
 
 
 class GuiLocalServer(QtCore.QObject):
@@ -90,17 +91,21 @@ class GuiTcpShowServer(QtCore.QObject):
         bind_address: str = "0.0.0.0",
         token: str = "",
         parent: QtCore.QObject | None = None,
+        command_handler=None,
     ) -> None:
         super().__init__(parent)
         self._port = int(port)
         self._bind_address = str(bind_address)
         self._token = str(token)
+        self._command_handler = command_handler
         self._buffers: dict[QtNetwork.QTcpSocket, bytes] = {}
         self._server = QtNetwork.QTcpServer(self)
         self._server.newConnection.connect(self._slot_new_connection)
 
     @classmethod
-    def from_environment(cls, parent: QtCore.QObject | None = None) -> "GuiTcpShowServer | None":
+    def from_environment(
+        cls, parent: QtCore.QObject | None = None, command_handler=None
+    ) -> "GuiTcpShowServer | None":
         raw = os.environ.get(cls.ENV_PORT, "").strip()
         if not raw:
             return None
@@ -112,11 +117,12 @@ class GuiTcpShowServer(QtCore.QObject):
             return None
         bind = os.environ.get(cls.ENV_BIND, "").strip() or "0.0.0.0"
         token = os.environ.get(cls.ENV_TOKEN, "").strip()
-        return cls(port, bind, token, parent=parent)
+        return cls(port, bind, token, parent=parent, command_handler=command_handler)
 
     def description(self) -> str:
-        suffix = " (token required)" if self._token else ""
-        return f"{self._bind_address}:{self._port}{suffix}"
+        if self._token:
+            return f"{self._bind_address}:{self._port} (token set: show + control)"
+        return f"{self._bind_address}:{self._port} (no token: show/raise only)"
 
     def start(self) -> bool:
         return self._server.listen(QtNetwork.QHostAddress(self._bind_address), self._port)
@@ -147,14 +153,51 @@ class GuiTcpShowServer(QtCore.QObject):
         if b"\n" not in buffer:
             return
         line = buffer.split(b"\n", 1)[0]
-        parts = line.decode("utf-8", errors="replace").strip().split()
-        command = parts[0].lower() if parts else ""
-        provided_token = parts[1] if len(parts) > 1 else ""
         self._buffers.pop(sock, None)
-        accepted = command in ("show", "raise") and (not self._token or provided_token == self._token)
-        if accepted:
-            sock.write(b"ok\n")
+        text = line.decode("utf-8", errors="replace").strip()
+
+        reply: dict | None = None
+        emit_show = False
+        if text.startswith("{"):
+            reply, emit_show = self._handle_command_line(text)
+        else:
+            # Bare "show [token]" text protocol (backward compatible).
+            parts = text.split()
+            command = parts[0].lower() if parts else ""
+            provided = parts[1] if len(parts) > 1 else ""
+            if command in ("show", "raise") and (not self._token or provided == self._token):
+                emit_show = True
+                reply = {"status": "ok"}
+
+        if reply is not None:
+            sock.write((json.dumps(reply, default=str) + "\n").encode("utf-8"))
             sock.flush()
         sock.disconnectFromHost()
-        if accepted:
+        if emit_show:
             self.sig_show_requested.emit()
+
+    def _handle_command_line(self, text: str) -> tuple[dict, bool]:
+        """Parse and dispatch a JSON command; return (reply, emit_show)."""
+        try:
+            cmd = json.loads(text)
+        except Exception:
+            return {"status": "error", "error": "invalid JSON"}, False
+        if not isinstance(cmd, dict) or "cmd" not in cmd:
+            return {"status": "error", "error": "missing cmd"}, False
+        name = str(cmd.get("cmd")).strip().lower()
+        if name in ("show", "raise"):
+            if self._token and cmd.get("token") != self._token:
+                return {"status": "error", "error": "invalid token"}, False
+            return {"status": "ok"}, True
+        # Control commands: gated on a configured, matching token.
+        if not self._token:
+            return {"status": "error", "error": "remote control disabled: no token configured on GUI"}, False
+        if cmd.get("token") != self._token:
+            return {"status": "error", "error": "invalid token"}, False
+        if self._command_handler is None:
+            return {"status": "error", "error": "remote control not available"}, False
+        try:
+            result = self._command_handler(cmd)
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}, False
+        return (result if isinstance(result, dict) else {"status": "ok"}), False

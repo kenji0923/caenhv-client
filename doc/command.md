@@ -71,6 +71,24 @@ fire_gui(host="hv-pc.lab", port=50251, token="labsecret")
 
 The GUI acknowledges accepted requests, so a wrong token or unreachable host is reported to the caller (`notify_gui` returns False; `fire_gui` raises with instructions).
 
+## Remote HV control (through the GUI gateway)
+
+Purpose: let labscript set HV values programmatically. The GUI is the single gateway to the devman server; remote commands are *executed by the GUI*, so every setpoint goes through its channel-link engine and safeguards (ramp/PDwn sync, SVMax/range validation, trip protection). This is the intended path for programmatic control — never a second client writing to devman directly, which would bypass those safeguards.
+
+Control is gated on a token: it works only when `CAENHV_CLIENT_TCP_TOKEN` is set on the GUI (in addition to `CAENHV_CLIENT_TCP_PORT`). With no token, the channel stays show/raise-only.
+
+```python
+from caenhv_client_python import set_vset, set_offset, set_power, set_param, get_channel
+
+kw = dict(host="hv-pc.lab", port=50251, token="labsecret")   # or via CAENHV_CLIENT_REMOTE + CAENHV_CLIENT_TCP_TOKEN
+set_vset(0, 0, 5.0, **kw)               # linked + safeguarded
+set_power(0, 0, True, **kw)             # linked groups: applied to the whole group
+set_param(0, 0, "rup", 10.0, **kw)      # rup, rdown, iset, trip, svmax, pdown
+values = get_channel(0, 0, **kw)        # readings + settings
+```
+
+A safeguard rejection (e.g. a target exceeding SVMax) comes back as a `RuntimeError` carrying the reason, and nothing is moved.
+
 Quick check from a shell:
 
 ```sh

@@ -1,23 +1,29 @@
 """Python interface to the caenhv-client GUI application.
 
 This package lets an external Python process (e.g. a labscript BLACS tab or
-worker) *fire* the standalone caenhv-client GUI: raise the window if the app
-is already running, or launch it otherwise. This is deliberately the only
-remote capability — there is no remote control of HV settings.
+worker) drive the standalone caenhv-client GUI:
 
-The GUI listens on a QLocalServer (named pipe ``\\\\.\\pipe\\<name>`` on
-Windows, Unix socket under the temp directory on POSIX). The protocol is a
-single newline-terminated UTF-8 token: ``show`` (``raise`` is accepted as an
-alias). Stdlib-only on every platform; PyQt5 is used as a fallback transport
-only if it happens to be importable.
+- *fire* it — raise the window if running, else launch it (`fire_gui`,
+  `notify_gui`), locally or to a remote host over TCP;
+- *control HV* — set Vset/offset/power/params and read channels
+  (`set_vset`, `set_power`, `set_param`, `set_offset`, `get_channel`,
+  `send_command`). Control requests are executed by the GUI, so they pass
+  through its channel-link engine and safeguards; the GUI is the single
+  gateway to the devman server. Control requires a token configured on the
+  GUI (`CAENHV_CLIENT_TCP_TOKEN`); without one the channel is show-only.
+
+Local fire/raise uses a QLocalServer (named pipe on Windows, Unix socket on
+POSIX); remote fire/control uses the GUI's opt-in TCP listener
+(`CAENHV_CLIENT_TCP_PORT`). Stdlib-only on every platform; PyQt5 is an
+optional local fallback transport.
 
 The GUI itself is distributed as a standalone executable (PyInstaller). Set
-the ``CAENHV_CLIENT_COMMAND`` environment variable to its full path (or a
-command line) if it is not on PATH.
+``CAENHV_CLIENT_COMMAND`` to its full path if it is not on PATH.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
@@ -44,8 +50,14 @@ __all__ = [
     "default_launch_cmd",
     "default_popen_kwargs",
     "fire_gui",
+    "get_channel",
     "get_server_name",
     "notify_gui",
+    "send_command",
+    "set_offset",
+    "set_param",
+    "set_power",
+    "set_vset",
 ]
 
 _qt_app = None
@@ -240,3 +252,80 @@ def fire_gui(
             return "launched"
         time.sleep(0.25)
     raise TimeoutError(f"caenhv-client GUI did not start within {launch_timeout} s (cmd: {cmd})")
+
+
+# --- Remote HV control (through the GUI gateway) ----------------------------
+#
+# Control commands are executed by the caenhv-client GUI on the target host,
+# so they pass through its channel-link engine and safeguards. The GUI must
+# have a token configured (CAENHV_CLIENT_TCP_TOKEN); without one it accepts
+# only show/raise. Host/port/token default to CAENHV_CLIENT_REMOTE and
+# CAENHV_CLIENT_TCP_TOKEN.
+
+
+def send_command(
+    cmd: dict,
+    *,
+    host: str | None = None,
+    port: int | None = None,
+    token: str | None = None,
+    timeout: float = 2.0,
+) -> dict:
+    """Send one JSON control command to a remote GUI and return its reply.
+
+    Raises RuntimeError if the GUI reports an error (bad token, control
+    disabled, or a safeguard rejection such as exceeding SVMax).
+    """
+    if host is None and port is None:
+        remote = _remote_from_env()
+        if remote is not None:
+            host, port = remote
+    if host is None or port is None:
+        raise ValueError("host and port are required (or set CAENHV_CLIENT_REMOTE=host:port)")
+    if token is None:
+        token = os.environ.get(ENV_REMOTE_TOKEN, "").strip()
+    payload = dict(cmd)
+    if token:
+        payload["token"] = token
+    line = (json.dumps(payload) + "\n").encode("utf-8")
+    with socket.create_connection((host, int(port)), timeout=timeout) as sock:
+        sock.sendall(line)
+        sock.settimeout(timeout)
+        buffer = b""
+        while b"\n" not in buffer:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            buffer += chunk
+    if not buffer.strip():
+        raise RuntimeError(
+            "no response from GUI (remote control may be disabled, or the token is wrong)"
+        )
+    reply = json.loads(buffer.split(b"\n", 1)[0].decode("utf-8"))
+    if reply.get("status") != "ok":
+        raise RuntimeError(reply.get("error", "remote command failed"))
+    return reply
+
+
+def get_channel(slot: int, ch: int, **kwargs) -> dict:
+    """Return the remote channel's readings and settings."""
+    return send_command({"cmd": "get", "slot": int(slot), "ch": int(ch)}, **kwargs)["values"]
+
+
+def set_vset(slot: int, ch: int, value: float, **kwargs) -> dict:
+    return send_command({"cmd": "set_vset", "slot": int(slot), "ch": int(ch), "value": float(value)}, **kwargs)
+
+
+def set_offset(slot: int, ch: int, value: float, **kwargs) -> dict:
+    return send_command({"cmd": "set_offset", "slot": int(slot), "ch": int(ch), "value": float(value)}, **kwargs)
+
+
+def set_power(slot: int, ch: int, on: bool, **kwargs) -> dict:
+    return send_command({"cmd": "set_power", "slot": int(slot), "ch": int(ch), "on": bool(on)}, **kwargs)
+
+
+def set_param(slot: int, ch: int, name: str, value, **kwargs) -> dict:
+    """Set a channel parameter: rup, rdown, iset, trip, svmax, or pdown."""
+    return send_command(
+        {"cmd": "set_param", "slot": int(slot), "ch": int(ch), "name": str(name), "value": value}, **kwargs
+    )

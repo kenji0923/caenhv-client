@@ -48,7 +48,9 @@ class StandaloneMainWindow(MainWindow):
             self.append_response_log(
                 f"WARNING: local IPC server failed to listen on '{self._local_server.server_name()}'"
             )
-        self._tcp_show_server = GuiTcpShowServer.from_environment(parent=self)
+        self._tcp_show_server = GuiTcpShowServer.from_environment(
+            parent=self, command_handler=self.handle_remote_command
+        )
         if self._tcp_show_server is not None:
             self._tcp_show_server.sig_show_requested.connect(self._slot_show_window)
             if self._tcp_show_server.start():
@@ -106,6 +108,73 @@ class StandaloneMainWindow(MainWindow):
                 "settings_check/interval_sec",
                 int(self.spinBoxSettingsCheckIntervalSec.value()),
             )
+
+    def handle_remote_command(self, cmd: dict) -> dict:
+        """Execute a remote control command through the safeguarded worker.
+
+        Runs on the GUI thread (QTcpServer signal), so every setpoint passes
+        through the same link engine, ramp/PDwn sync, and SVMax validation as
+        an operator edit. Exceptions propagate to the caller as errors.
+        """
+        name = str(cmd.get("cmd", "")).strip().lower()
+        if name == "get":
+            slot, channel = int(cmd["slot"]), int(cmd["ch"])
+            values = dict(self._worker.fetch_channel_settings(slot, channel))
+            snap = self._worker.refresh_channel_snapshot(slot, channel)
+            values.update(snap)
+            self.on_channel_updated(slot, channel, snap)
+            return {"status": "ok", "slot": slot, "ch": channel, "values": values}
+        if name == "set_vset":
+            slot, channel, value = int(cmd["slot"]), int(cmd["ch"]), float(cmd["value"])
+            result = self._worker.apply_linked_vset(slot, channel, value)
+            self._log_move_notices(slot, channel, result)
+            self._apply_cached_linked_widget_settings()
+            self.on_channel_updated(slot, channel, self._worker.refresh_channel_snapshot(slot, channel))
+            self.append_response_log(f"remote set_vset slot={slot} ch={channel} value={value}")
+            return {"status": "ok"}
+        if name == "set_offset":
+            slot, channel, value = int(cmd["slot"]), int(cmd["ch"]), float(cmd["value"])
+            result = self._worker.apply_linked_offset(slot, channel, value)
+            self._log_move_notices(slot, channel, result)
+            self._apply_cached_linked_widget_settings()
+            self.append_response_log(f"remote set_offset slot={slot} ch={channel} value={value}")
+            return {"status": "ok"}
+        if name == "set_power":
+            slot, channel = int(cmd["slot"]), int(cmd["ch"])
+            raw = cmd.get("on", cmd.get("value"))
+            on = raw if isinstance(raw, bool) else str(raw).strip().lower() in ("1", "true", "yes", "on")
+            linked = self._worker.get_linked_channels_recursive(slot, channel)
+            if len(linked) > 1:
+                # No confirmation dialog is possible remotely; apply to the
+                # whole linked group (the GUI's post-confirmation behavior).
+                info = self._worker.set_power_for_channels(linked, on, initiator=(slot, channel))
+                self._log_move_notices(slot, channel, info)
+            else:
+                self._worker.apply_linked_power(slot, channel, on)
+            self._apply_cached_linked_widget_settings()
+            self.append_response_log(f"remote set_power slot={slot} ch={channel} on={on}")
+            return {"status": "ok", "applied_to": [f"{s}:{c}" for s, c in sorted(linked)]}
+        if name == "set_param":
+            slot, channel = int(cmd["slot"]), int(cmd["ch"])
+            field = str(cmd["name"]).strip().lower()
+            value = cmd["value"]
+            if field in ("rup", "rdown", "rdwn"):
+                ramp_field = "rup" if field == "rup" else "rdown"
+                linked = self._worker.get_linked_channels_recursive(slot, channel)
+                updates = self._worker.apply_linked_ramp(slot, channel, ramp_field, float(value))
+                self.apply_link_ramp_values(list(linked), updates)
+            elif field == "pdown":
+                linked = self._worker.get_linked_channels_recursive(slot, channel)
+                for l_slot, l_channel in sorted(linked):
+                    self._worker.set_channel_param(int(l_slot), int(l_channel), "PDWN", str(value))
+            else:
+                backend = {"iset": "I0Set", "trip": "Trip", "svmax": "SVMax"}.get(field)
+                if backend is None:
+                    return {"status": "error", "error": f"unknown param '{field}'"}
+                self._worker.set_channel_param(slot, channel, backend, float(value))
+            self.append_response_log(f"remote set_param slot={slot} ch={channel} {field}={value}")
+            return {"status": "ok"}
+        return {"status": "error", "error": f"unknown cmd '{name}'"}
 
     @QtCore.pyqtSlot()
     def _slot_show_window(self) -> None:
