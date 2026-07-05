@@ -36,6 +36,22 @@ hv.set_param(0, 0, "rup", 10.0) # rup, rdown, iset, trip, svmax, pdown
 hv.raise_window()               # bring the GUI forward (no focus steal)
 ```
 
+Typed getters mirror the setters (each returns one value, raising a clear
+error if the parameter could not be read):
+
+```python
+hv.get_vset(0, 0)          # float, volts (signed by polarity)
+hv.get_vmon(0, 0)          # float, measured voltage (signed)
+hv.get_imon(0, 0)          # float, measured current
+hv.get_power(0, 0)         # bool
+hv.get_status(0, 0)        # int, CAEN Status bitmask
+hv.get_param(0, 0, "svmax")  # rup, rdown, iset, trip, svmax, pdown
+```
+
+For several fields at once, `get_channel(0, 0)` returns them all in one
+round-trip: keys `vset, vmon, imon, power, status, rup, rdown, iset, trip,
+svmax, pdown, label` (a key is absent if that parameter could not be read).
+
 The module-level functions (`set_vset`, `set_power`, `get_channel`,
 `set_offset`, `set_param`, `send_command`) remain available if you prefer
 passing `host=`, `port=`, `token=` per call. Any safeguard rejection (e.g.

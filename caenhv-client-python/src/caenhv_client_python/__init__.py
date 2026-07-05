@@ -52,7 +52,13 @@ __all__ = [
     "default_popen_kwargs",
     "fire_gui",
     "get_channel",
+    "get_imon",
+    "get_param",
+    "get_power",
     "get_server_name",
+    "get_status",
+    "get_vmon",
+    "get_vset",
     "notify_gui",
     "send_command",
     "set_offset",
@@ -332,6 +338,72 @@ def set_param(slot: int, ch: int, name: str, value, **kwargs) -> dict:
     )
 
 
+# --- Typed getters (mirror the setters) -------------------------------------
+#
+# Each does one round-trip and returns a single, typed value. Reading several
+# fields at once? Call get_channel() once and index the dict instead.
+
+_PARAM_KEYS = {"rup", "rdown", "rdwn", "iset", "trip", "svmax", "pdown", "label"}
+
+
+def _read_field(slot: int, ch: int, key: str, kwargs: dict):
+    values = get_channel(slot, ch, **kwargs)
+    if key not in values:
+        raise RuntimeError(
+            f"channel {slot}:{ch} did not report '{key}' "
+            "(the GUI could not read that parameter from the crate)"
+        )
+    return values[key]
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    try:
+        return bool(int(value))
+    except (TypeError, ValueError):
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def get_vset(slot: int, ch: int, **kwargs) -> float:
+    """Vset setpoint in volts (signed by polarity)."""
+    return float(_read_field(slot, ch, "vset", kwargs))
+
+
+def get_vmon(slot: int, ch: int, **kwargs) -> float:
+    """Measured output voltage in volts (signed by polarity)."""
+    return float(_read_field(slot, ch, "vmon", kwargs))
+
+
+def get_imon(slot: int, ch: int, **kwargs) -> float:
+    """Measured output current (unsigned magnitude)."""
+    return float(_read_field(slot, ch, "imon", kwargs))
+
+
+def get_power(slot: int, ch: int, **kwargs) -> bool:
+    """True when the channel is on."""
+    return _as_bool(_read_field(slot, ch, "power", kwargs))
+
+
+def get_status(slot: int, ch: int, **kwargs) -> int:
+    """Raw CAEN Status bitmask (bit 0 ON, 6 external trip, 8 internal trip)."""
+    return int(_read_field(slot, ch, "status", kwargs))
+
+
+def get_param(slot: int, ch: int, name: str, **kwargs):
+    """Read one parameter (mirrors set_param): rup, rdown, iset, trip, svmax, pdown, label.
+
+    Numeric parameters return float; pdown and label return str.
+    """
+    key = str(name).strip().lower()
+    if key == "rdwn":
+        key = "rdown"
+    if key not in _PARAM_KEYS:
+        raise ValueError(f"unknown param '{name}'; expected one of {sorted(_PARAM_KEYS - {'rdwn'})}")
+    value = _read_field(slot, ch, key, kwargs)
+    return str(value) if key in ("pdown", "label") else float(value)
+
+
 class RemoteClient:
     """Bound client for a caenhv-client GUI: set host/port/token once.
 
@@ -383,6 +455,24 @@ class RemoteClient:
 
     def set_param(self, slot: int, ch: int, name: str, value) -> dict:
         return set_param(slot, ch, name, value, **self._kw())
+
+    def get_vset(self, slot: int, ch: int) -> float:
+        return get_vset(slot, ch, **self._kw())
+
+    def get_vmon(self, slot: int, ch: int) -> float:
+        return get_vmon(slot, ch, **self._kw())
+
+    def get_imon(self, slot: int, ch: int) -> float:
+        return get_imon(slot, ch, **self._kw())
+
+    def get_power(self, slot: int, ch: int) -> bool:
+        return get_power(slot, ch, **self._kw())
+
+    def get_status(self, slot: int, ch: int) -> int:
+        return get_status(slot, ch, **self._kw())
+
+    def get_param(self, slot: int, ch: int, name: str):
+        return get_param(slot, ch, name, **self._kw())
 
     def raise_window(self) -> bool:
         """Raise the GUI window if reachable (no launch). Returns success."""

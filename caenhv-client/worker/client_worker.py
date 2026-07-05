@@ -48,7 +48,7 @@ class ClientWorker:
 
     def _to_ui_voltage(self, slot: int, param_name: str, value: Any) -> Any:
         name = str(param_name).strip().upper()
-        if name in ("V0SET", "SVMAX"):
+        if name in ("V0SET", "SVMAX", "VMON"):
             try:
                 num = float(value)
             except Exception:
@@ -1236,7 +1236,10 @@ class ClientWorker:
         payload: dict[str, Any] = {}
         # These parameters are standard on many CAEN systems; tolerate failures.
         try:
-            payload["vmon"] = bridge.Device_get_ch_param(slot, [channel], "VMon")[0]
+            # Signed by polarity, consistent with vset and the GUI display.
+            payload["vmon"] = self._to_ui_voltage(
+                slot, "VMon", bridge.Device_get_ch_param(slot, [channel], "VMon")[0]
+            )
         except Exception:
             pass
         try:
@@ -1270,7 +1273,6 @@ class ClientWorker:
             ("RUp", "rup"),
             ("Trip", "trip"),
             ("SVMax", "svmax"),
-            ("PDWN", "pdown"),
         )
         for param_name, key in params:
             try:
@@ -1292,6 +1294,13 @@ class ClientWorker:
                 try:
                     raw = bridge.Device_get_ch_param(slot, [channel], rdown_name)[0]
                     payload["rdown"] = self._to_ui_voltage(slot, rdown_name, raw)
+                    break
+                except Exception:
+                    continue
+        if "pdown" not in payload:
+            for pdown_name in self._PDWN_NAMES:
+                try:
+                    payload["pdown"] = bridge.Device_get_ch_param(slot, [channel], pdown_name)[0]
                     break
                 except Exception:
                     continue
