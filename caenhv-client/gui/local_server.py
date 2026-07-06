@@ -145,36 +145,38 @@ class GuiTcpShowServer(QtCore.QObject):
         if sock not in self._buffers:
             return
         buffer = self._buffers[sock] + bytes(sock.readAll())
-        if len(buffer) > _MAX_COMMAND_BYTES:
-            self._buffers.pop(sock, None)
-            sock.disconnectFromHost()
-            return
-        self._buffers[sock] = buffer
-        if b"\n" not in buffer:
-            return
-        line = buffer.split(b"\n", 1)[0]
-        self._buffers.pop(sock, None)
-        text = line.decode("utf-8", errors="replace").strip()
-
-        reply: dict | None = None
-        emit_show = False
-        if text.startswith("{"):
-            reply, emit_show = self._handle_command_line(text)
-        else:
-            # Bare "show [token]" text protocol (backward compatible).
-            parts = text.split()
-            command = parts[0].lower() if parts else ""
-            provided = parts[1] if len(parts) > 1 else ""
-            if command in ("show", "raise") and (not self._token or provided == self._token):
-                emit_show = True
-                reply = {"status": "ok"}
-
-        if reply is not None:
+        # Process every complete (newline-terminated) command in order, and
+        # keep the connection open afterwards so a client may reuse it for
+        # further commands (persistent connection). One reply per command.
+        pending_show = False
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            text = line.decode("utf-8", errors="replace").strip()
+            if not text:
+                continue
+            reply, emit_show = self._process_line(text)
             sock.write((json.dumps(reply, default=str) + "\n").encode("utf-8"))
             sock.flush()
-        sock.disconnectFromHost()
-        if emit_show:
+            pending_show = pending_show or emit_show
+        if len(buffer) > _MAX_COMMAND_BYTES:
+            # Unterminated garbage; drop the connection rather than buffer it.
+            self._buffers.pop(sock, None)
+            sock.disconnectFromHost()
+        else:
+            self._buffers[sock] = buffer
+        if pending_show:
             self.sig_show_requested.emit()
+
+    def _process_line(self, text: str) -> tuple[dict, bool]:
+        if text.startswith("{"):
+            return self._handle_command_line(text)
+        # Bare "show [token]" text protocol (backward compatible).
+        parts = text.split()
+        command = parts[0].lower() if parts else ""
+        provided = parts[1] if len(parts) > 1 else ""
+        if command in ("show", "raise") and (not self._token or provided == self._token):
+            return {"status": "ok"}, True
+        return {"status": "error", "error": "unknown command"}, False
 
     def _handle_command_line(self, text: str) -> tuple[dict, bool]:
         """Parse and dispatch a JSON command; return (reply, emit_show)."""

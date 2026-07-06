@@ -55,6 +55,7 @@ __all__ = [
     "get_imon",
     "get_link",
     "get_links",
+    "get_many",
     "get_offset",
     "get_param",
     "get_power",
@@ -142,10 +143,18 @@ def _notify_via_tcp(host: str, port: int, token: str, timeout: float) -> bool:
         with socket.create_connection((host, int(port)), timeout=timeout) as sock:
             sock.sendall(message.encode("utf-8"))
             sock.settimeout(timeout)
-            # The GUI acknowledges accepted requests; rejection (e.g. bad
-            # token) closes the connection without a reply.
-            return sock.recv(8).startswith(b"ok")
+            data = sock.recv(256)
     except OSError:
+        return False
+    if not data:
+        return False  # rejected (e.g. bad token): closed without a reply
+    text = data.split(b"\n", 1)[0].strip()
+    # Accept both the JSON reply ({"status": "ok"}) and the legacy bare "ok".
+    if text.startswith(b"ok"):
+        return True
+    try:
+        return json.loads(text.decode("utf-8")).get("status") == "ok"
+    except Exception:
         return False
 
 
@@ -273,6 +282,45 @@ def fire_gui(
 # CAENHV_CLIENT_TCP_TOKEN.
 
 
+def _resolve_target(host, port, token):
+    if host is None and port is None:
+        remote = _remote_from_env()
+        if remote is not None:
+            host, port = remote
+    if host is None or port is None:
+        raise ValueError("host and port are required (or set CAENHV_CLIENT_REMOTE=host:port)")
+    if token is None:
+        token = os.environ.get(ENV_REMOTE_TOKEN, "").strip()
+    return host, int(port), token
+
+
+def _encode(cmd: dict, token: str) -> bytes:
+    payload = dict(cmd)
+    if token:
+        payload["token"] = token
+    return (json.dumps(payload) + "\n").encode("utf-8")
+
+
+def _read_reply(sock, timeout: float) -> dict:
+    sock.settimeout(timeout)
+    buffer = b""
+    while b"\n" not in buffer:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buffer += chunk
+    if not buffer.strip():
+        # Transport-level (connection closed / control disabled / wrong token);
+        # ConnectionError is an OSError, so persistent clients drop the socket.
+        raise ConnectionError(
+            "no response from GUI (connection closed, remote control disabled, or wrong token)"
+        )
+    reply = json.loads(buffer.split(b"\n", 1)[0].decode("utf-8"))
+    if reply.get("status") != "ok":
+        raise RuntimeError(reply.get("error", "remote command failed"))
+    return reply
+
+
 def send_command(
     cmd: dict,
     *,
@@ -283,38 +331,19 @@ def send_command(
 ) -> dict:
     """Send one JSON control command to a remote GUI and return its reply.
 
+    Opens a fresh connection per call. For many calls, reuse a connection
+    with ``RemoteClient(..., persistent=True)``.
+
     Raises RuntimeError if the GUI reports an error (bad token, control
     disabled, or a safeguard rejection such as exceeding SVMax).
     """
-    if host is None and port is None:
-        remote = _remote_from_env()
-        if remote is not None:
-            host, port = remote
-    if host is None or port is None:
-        raise ValueError("host and port are required (or set CAENHV_CLIENT_REMOTE=host:port)")
-    if token is None:
-        token = os.environ.get(ENV_REMOTE_TOKEN, "").strip()
-    payload = dict(cmd)
-    if token:
-        payload["token"] = token
-    line = (json.dumps(payload) + "\n").encode("utf-8")
-    with socket.create_connection((host, int(port)), timeout=timeout) as sock:
-        sock.sendall(line)
-        sock.settimeout(timeout)
-        buffer = b""
-        while b"\n" not in buffer:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            buffer += chunk
-    if not buffer.strip():
-        raise RuntimeError(
-            "no response from GUI (remote control may be disabled, or the token is wrong)"
-        )
-    reply = json.loads(buffer.split(b"\n", 1)[0].decode("utf-8"))
-    if reply.get("status") != "ok":
-        raise RuntimeError(reply.get("error", "remote command failed"))
-    return reply
+    host, port, token = _resolve_target(host, port, token)
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            sock.sendall(_encode(cmd, token))
+            return _read_reply(sock, timeout)
+    except ConnectionError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def get_channel(slot: int, ch: int, **kwargs) -> dict:
@@ -323,18 +352,32 @@ def get_channel(slot: int, ch: int, **kwargs) -> dict:
 
 
 def get_link(slot: int, ch: int, **kwargs) -> dict:
-    """Return the channel's link relationship: {'reference', 'offset'}.
+    """Return the channel's link relationship.
 
-    'reference' is the 'slot:ch' string this channel is linked to (or None),
-    'offset' its relative level in volts (or None when unlinked).
+    {'linked': bool, 'master_slot': int|None, 'master_channel': int|None,
+     'offset': float}
     """
-    reply = send_command({"cmd": "get_link", "slot": int(slot), "ch": int(ch)}, **kwargs)
-    return {"reference": reply.get("reference"), "offset": reply.get("offset")}
+    return send_command({"cmd": "get_link", "slot": int(slot), "ch": int(ch)}, **kwargs)["values"]
 
 
-def get_offset(slot: int, ch: int, **kwargs):
-    """Return the channel's link offset in volts, or None when unlinked."""
+def get_offset(slot: int, ch: int, **kwargs) -> float:
+    """Return the channel's link offset in volts (0.0 when unlinked)."""
     return get_link(slot, ch, **kwargs)["offset"]
+
+
+def get_many(channels, include_link: bool = False, **kwargs) -> list:
+    """Read many channels in one round-trip.
+
+    channels: iterable of (slot, ch). Returns a list aligned with channels;
+    each item is {vmon, vset, imon, power, status[, link]} or {'error': ...}
+    for a channel that could not be read.
+    """
+    payload = {
+        "cmd": "get_many",
+        "channels": [[int(s), int(c)] for s, c in channels],
+        "include_link": bool(include_link),
+    }
+    return send_command(payload, **kwargs)["values"]
 
 
 def get_links(**kwargs) -> dict:
@@ -435,76 +478,143 @@ class RemoteClient:
     >>> hv.get_channel(0, 0)
     >>> hv.raise_window()
 
-    All methods mirror the module-level functions but reuse the connection
-    details. Safeguard rejections (e.g. exceeding SVMax) raise RuntimeError.
+    All methods reuse the connection details. Safeguard rejections (e.g.
+    exceeding SVMax) raise RuntimeError.
+
+    With ``persistent=True`` a single socket is held and reused across calls
+    (lower overhead for many requests); it reconnects automatically on a
+    transport error. Use one instance per thread (one outstanding request at
+    a time), and ``close()`` it when done (or use it as a context manager).
     """
 
-    def __init__(self, host: str, port: int, token: str | None = None, *, timeout: float = 2.0) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        token: str | None = None,
+        *,
+        timeout: float = 2.0,
+        persistent: bool = False,
+    ) -> None:
         self.host = str(host)
         self.port = int(port)
         self.token = token if token is not None else os.environ.get(ENV_REMOTE_TOKEN, "").strip()
         self.timeout = float(timeout)
+        self.persistent = bool(persistent)
+        self._sock = None
 
     @classmethod
-    def from_env(cls, *, timeout: float = 2.0) -> "RemoteClient":
+    def from_env(cls, *, timeout: float = 2.0, persistent: bool = False) -> "RemoteClient":
         """Build from CAENHV_CLIENT_REMOTE=host:port and CAENHV_CLIENT_TCP_TOKEN."""
         remote = _remote_from_env()
         if remote is None:
             raise ValueError(f"set {ENV_REMOTE}=host:port (or pass host/port explicitly)")
         host, port = remote
-        return cls(host, port, timeout=timeout)
+        return cls(host, port, timeout=timeout, persistent=persistent)
 
     def __repr__(self) -> str:
         gated = "token" if self.token else "no-token"
-        return f"RemoteClient({self.host}:{self.port}, {gated})"
+        mode = ", persistent" if self.persistent else ""
+        return f"RemoteClient({self.host}:{self.port}, {gated}{mode})"
 
-    def _kw(self) -> dict:
-        return {"host": self.host, "port": self.port, "token": self.token, "timeout": self.timeout}
+    def __enter__(self) -> "RemoteClient":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            finally:
+                self._sock = None
+
+    def _persistent_send(self, cmd: dict) -> dict:
+        line = _encode(cmd, self.token)
+        try:
+            if self._sock is None:
+                self._sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+            self._sock.sendall(line)
+            return _read_reply(self._sock, self.timeout)
+        except (OSError, ConnectionError) as exc:
+            # Transport failure: drop the socket so the next call reconnects.
+            self.close()
+            raise RuntimeError(f"remote connection error: {exc}") from exc
+        # RuntimeError (command error, e.g. SVMax) propagates with socket kept.
 
     def send_command(self, cmd: dict) -> dict:
-        return send_command(cmd, **self._kw())
+        if self.persistent:
+            return self._persistent_send(cmd)
+        return send_command(cmd, host=self.host, port=self.port, token=self.token, timeout=self.timeout)
 
+    # --- reads ---
     def get_channel(self, slot: int, ch: int) -> dict:
-        return get_channel(slot, ch, **self._kw())
+        return self.send_command({"cmd": "get", "slot": int(slot), "ch": int(ch)})["values"]
 
-    def set_vset(self, slot: int, ch: int, value: float) -> dict:
-        return set_vset(slot, ch, value, **self._kw())
-
-    def set_offset(self, slot: int, ch: int, value: float) -> dict:
-        return set_offset(slot, ch, value, **self._kw())
-
-    def set_power(self, slot: int, ch: int, on: bool) -> dict:
-        return set_power(slot, ch, on, **self._kw())
-
-    def set_param(self, slot: int, ch: int, name: str, value) -> dict:
-        return set_param(slot, ch, name, value, **self._kw())
-
-    def get_vset(self, slot: int, ch: int) -> float:
-        return get_vset(slot, ch, **self._kw())
-
-    def get_vmon(self, slot: int, ch: int) -> float:
-        return get_vmon(slot, ch, **self._kw())
-
-    def get_imon(self, slot: int, ch: int) -> float:
-        return get_imon(slot, ch, **self._kw())
-
-    def get_power(self, slot: int, ch: int) -> bool:
-        return get_power(slot, ch, **self._kw())
-
-    def get_status(self, slot: int, ch: int) -> int:
-        return get_status(slot, ch, **self._kw())
-
-    def get_param(self, slot: int, ch: int, name: str):
-        return get_param(slot, ch, name, **self._kw())
+    def get_many(self, channels, include_link: bool = False) -> list:
+        return self.send_command({
+            "cmd": "get_many",
+            "channels": [[int(s), int(c)] for s, c in channels],
+            "include_link": bool(include_link),
+        })["values"]
 
     def get_link(self, slot: int, ch: int) -> dict:
-        return get_link(slot, ch, **self._kw())
+        return self.send_command({"cmd": "get_link", "slot": int(slot), "ch": int(ch)})["values"]
 
-    def get_offset(self, slot: int, ch: int):
-        return get_offset(slot, ch, **self._kw())
+    def get_offset(self, slot: int, ch: int) -> float:
+        return self.get_link(slot, ch)["offset"]
 
     def get_links(self) -> dict:
-        return get_links(**self._kw())
+        return self.send_command({"cmd": "get_links"})["links"]
+
+    def _field(self, slot: int, ch: int, key: str):
+        values = self.get_channel(slot, ch)
+        if key not in values:
+            raise RuntimeError(
+                f"channel {slot}:{ch} did not report '{key}' "
+                "(the GUI could not read that parameter from the crate)"
+            )
+        return values[key]
+
+    def get_vset(self, slot: int, ch: int) -> float:
+        return float(self._field(slot, ch, "vset"))
+
+    def get_vmon(self, slot: int, ch: int) -> float:
+        return float(self._field(slot, ch, "vmon"))
+
+    def get_imon(self, slot: int, ch: int) -> float:
+        return float(self._field(slot, ch, "imon"))
+
+    def get_power(self, slot: int, ch: int) -> bool:
+        return _as_bool(self._field(slot, ch, "power"))
+
+    def get_status(self, slot: int, ch: int) -> int:
+        return int(self._field(slot, ch, "status"))
+
+    def get_param(self, slot: int, ch: int, name: str):
+        key = str(name).strip().lower()
+        if key == "rdwn":
+            key = "rdown"
+        if key not in _PARAM_KEYS:
+            raise ValueError(f"unknown param '{name}'; expected one of {sorted(_PARAM_KEYS - {'rdwn'})}")
+        value = self._field(slot, ch, key)
+        return str(value) if key in ("pdown", "label") else float(value)
+
+    # --- writes ---
+    def set_vset(self, slot: int, ch: int, value: float) -> dict:
+        return self.send_command({"cmd": "set_vset", "slot": int(slot), "ch": int(ch), "value": float(value)})
+
+    def set_offset(self, slot: int, ch: int, value: float) -> dict:
+        return self.send_command({"cmd": "set_offset", "slot": int(slot), "ch": int(ch), "value": float(value)})
+
+    def set_power(self, slot: int, ch: int, on: bool) -> dict:
+        return self.send_command({"cmd": "set_power", "slot": int(slot), "ch": int(ch), "on": bool(on)})
+
+    def set_param(self, slot: int, ch: int, name: str, value) -> dict:
+        return self.send_command(
+            {"cmd": "set_param", "slot": int(slot), "ch": int(ch), "name": str(name), "value": value}
+        )
 
     def raise_window(self) -> bool:
         """Raise the GUI window if reachable (no launch). Returns success."""

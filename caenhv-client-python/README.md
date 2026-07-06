@@ -51,10 +51,29 @@ hv.get_param(0, 0, "svmax")  # rup, rdown, iset, trip, svmax, pdown
 Channel-link relationship and offset:
 
 ```python
-hv.get_link(0, 1)          # {'reference': '0:0', 'offset': -200.0} (or None when unlinked)
+hv.get_link(0, 1)          # {'linked': True, 'master_slot': 0, 'master_channel': 0, 'offset': -200.0}
 hv.get_offset(0, 1)        # -200.0
 hv.set_offset(0, 1, -150.0)  # change the relative level (linked + safeguarded)
-hv.get_links()             # {'0:1': {'reference': '0:0', 'offset': -200.0}, ...} for the whole crate
+```
+
+Bulk read — many channels in one round-trip (the low-overhead path):
+
+```python
+rows = hv.get_many([(0, 0), (0, 1), (1, 0)], include_link=True)
+# rows[i] = {'vmon':.., 'vset':.., 'imon':.., 'power':.., 'status':..,
+#            'link': {'linked':.., 'master_slot':.., 'master_channel':.., 'offset':..}}
+# a channel that cannot be read appears as {'error': '...'} at its index
+```
+
+For many calls, hold one connection open (reconnects automatically on error):
+
+```python
+hv = RemoteClient("hv-pc", 50251, token="labsecret", persistent=True)
+try:
+    while running:
+        rows = hv.get_many(channels, include_link=True)
+finally:
+    hv.close()          # or use `with RemoteClient(...) as hv:`
 ```
 
 For several fields at once, `get_channel(0, 0)` returns them all in one

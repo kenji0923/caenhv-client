@@ -126,15 +126,21 @@ class StandaloneMainWindow(MainWindow):
             return {"status": "ok", "slot": slot, "ch": channel, "values": values}
         if name == "get_link":
             slot, channel = int(cmd["slot"]), int(cmd["ch"])
-            reference = self._worker.get_link_reference(slot, channel)
-            offset = self._worker.get_link_offset(slot, channel)
-            return {
-                "status": "ok",
-                "slot": slot,
-                "ch": channel,
-                "reference": (f"{reference[0]}:{reference[1]}" if reference else None),
-                "offset": offset,
-            }
+            return {"status": "ok", "values": self._worker.link_info(slot, channel)}
+        if name == "get_many":
+            channels = cmd.get("channels") or []
+            include_link = bool(cmd.get("include_link", False))
+            values: list = []
+            for pair in channels:
+                try:
+                    slot, channel = int(pair[0]), int(pair[1])
+                    entry = self._worker.read_channel_brief(slot, channel)
+                    if include_link:
+                        entry["link"] = self._worker.link_info(slot, channel)
+                    values.append(entry)
+                except Exception as exc:  # one bad channel must not blank the rest
+                    values.append({"error": str(exc)})
+            return {"status": "ok", "values": values}
         if name == "get_links":
             return {
                 "status": "ok",

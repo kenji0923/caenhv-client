@@ -417,6 +417,36 @@ class ClientWorker:
             for s, (r, o) in self._link_rules.items()
         }
 
+    def link_info(self, slot: int, channel: int) -> dict[str, Any]:
+        """Link relationship of one channel (remote-API shape)."""
+        reference = self.get_link_reference(int(slot), int(channel))
+        offset = self.get_link_offset(int(slot), int(channel))
+        return {
+            "linked": reference is not None,
+            "master_slot": (reference[0] if reference else None),
+            "master_channel": (reference[1] if reference else None),
+            "offset": (float(offset) if offset is not None else 0.0),
+        }
+
+    def read_channel_brief(self, slot: int, channel: int) -> dict[str, Any]:
+        """Essential monitoring fields for bulk reads (same names/signs as get)."""
+        bridge = self._ensure_bridge()
+        payload = self.refresh_channel_snapshot(int(slot), int(channel))  # vmon, imon, status
+        try:
+            raw = bridge.Device_get_ch_param(int(slot), [int(channel)], "V0Set")[0]
+            payload["vset"] = self._to_ui_voltage(int(slot), "V0Set", raw)
+        except Exception:
+            pass
+        for pw_name in ("Pw", "PW", "Pon"):
+            try:
+                payload["power"] = bridge.Device_get_ch_param(int(slot), [int(channel)], pw_name)[0]
+                break
+            except Exception:
+                continue
+        if not payload:
+            raise RuntimeError(f"channel {slot}:{channel} could not be read")
+        return payload
+
     def get_link_reference(self, slot: int, channel: int) -> tuple[int, int] | None:
         key = (int(slot), int(channel))
         current = self._link_rules.get(key)
