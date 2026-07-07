@@ -65,6 +65,7 @@ __all__ = [
     "get_vset",
     "notify_gui",
     "send_command",
+    "set_linked_bulk",
     "set_offset",
     "set_param",
     "set_power",
@@ -404,6 +405,19 @@ def set_param(slot: int, ch: int, name: str, value, **kwargs) -> dict:
     )
 
 
+def set_linked_bulk(sets, **kwargs) -> dict:
+    """Apply several linked vset/offset changes atomically (one round-trip).
+
+    sets: iterable of dicts, each {"slot", "ch", "vset": float} (a master
+    setpoint) or {"slot", "ch", "offset": float} (a linked channel's relative
+    level). Seeding all changes at once avoids an intermediate-step rejection
+    that a valid final state could hit when applied per channel. Returns the
+    reply (with 'targets': {'slot:ch': volts}); safeguard failures raise and
+    nothing is moved.
+    """
+    return send_command({"cmd": "set_linked_bulk", "sets": [dict(s) for s in sets]}, **kwargs)
+
+
 # --- Typed getters (mirror the setters) -------------------------------------
 #
 # Each does one round-trip and returns a single, typed value. Reading several
@@ -615,6 +629,10 @@ class RemoteClient:
         return self.send_command(
             {"cmd": "set_param", "slot": int(slot), "ch": int(ch), "name": str(name), "value": value}
         )
+
+    def set_linked_bulk(self, sets) -> dict:
+        """Apply several linked vset/offset changes atomically (see set_linked_bulk)."""
+        return self.send_command({"cmd": "set_linked_bulk", "sets": [dict(s) for s in sets]})
 
     def raise_window(self) -> bool:
         """Raise the GUI window if reachable (no launch). Returns success."""

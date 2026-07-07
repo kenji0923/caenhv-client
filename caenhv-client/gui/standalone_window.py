@@ -162,6 +162,18 @@ class StandaloneMainWindow(MainWindow):
             self._apply_cached_linked_widget_settings()
             self.append_response_log(f"remote set_offset slot={slot} ch={channel} value={value}")
             return {"status": "ok"}
+        if name == "set_linked_bulk":
+            sets = cmd.get("sets") or []
+            if not isinstance(sets, list) or not sets:
+                return {"status": "error", "error": "set_linked_bulk requires a non-empty 'sets' list"}
+            result = self._worker.apply_linked_bulk(sets)
+            first = (int(sets[0]["slot"]), int(sets[0]["ch"]))
+            self._log_move_notices(first[0], first[1], result)
+            self._apply_cached_linked_widget_settings()
+            for slot, channel in {(int(s["slot"]), int(s["ch"])) for s in sets}:
+                self.on_channel_updated(slot, channel, self._worker.refresh_channel_snapshot(slot, channel))
+            self.append_response_log(f"remote set_linked_bulk count={len(sets)}")
+            return {"status": "ok", "targets": result.get("targets", {})}
         if name == "set_power":
             slot, channel = int(cmd["slot"]), int(cmd["ch"])
             raw = cmd.get("on", cmd.get("value"))

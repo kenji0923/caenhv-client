@@ -56,6 +56,16 @@ hv.get_offset(0, 1)        # -200.0
 hv.set_offset(0, 1, -150.0)  # change the relative level (linked + safeguarded)
 ```
 
+Atomic multi-channel apply — set several linked vset/offset changes at once so
+a valid final state is not rejected at an intermediate per-channel step:
+
+```python
+hv.set_linked_bulk([
+    {"slot": 0, "ch": 0, "vset": 1000.0},    # a master setpoint
+    {"slot": 0, "ch": 1, "offset": 2000.0},  # a linked channel's relative level
+])   # -> {'status': 'ok', 'targets': {'0:0': 1000.0, '0:1': 3000.0}}
+```
+
 Bulk read — many channels in one round-trip (the low-overhead path):
 
 ```python

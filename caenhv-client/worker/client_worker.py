@@ -1490,6 +1490,72 @@ class ClientWorker:
             raise
         return {"ramp_resync": ramp_resync, "ramping": ramping, "pdown_synced": pdown_synced}
 
+    def apply_linked_bulk(self, sets: list[dict]) -> dict[str, Any]:
+        """Apply several linked vset/offset changes atomically.
+
+        Each entry is {"slot", "ch", "vset": float} (a master setpoint) or
+        {"slot", "ch", "offset": float} (relative level of a linked channel).
+        All requested changes are seeded before validation, so a valid final
+        state is not rejected at an intermediate single-channel step. Link
+        rules are rolled back on any failure.
+        """
+        if not sets:
+            raise ValueError("apply_linked_bulk requires at least one entry")
+        keys = [(int(s["slot"]), int(s["ch"])) for s in sets]
+        snapshot = {k: self._link_rules.get(k) for k in keys}
+        requested_values: dict[tuple[int, int], float] = {}
+        try:
+            # vset entries are direct master requests.
+            for s in sets:
+                if "vset" in s:
+                    requested_values[(int(s["slot"]), int(s["ch"]))] = float(s["vset"])
+                elif "offset" not in s:
+                    raise ValueError(
+                        f"bulk entry for {s.get('slot')}:{s.get('ch')} needs 'vset' or 'offset'"
+                    )
+            # offset entries update the link rule and seed the resulting target
+            # (from its reference's new value if that reference is also set here,
+            # otherwise its current value).
+            for s in sets:
+                if "offset" not in s:
+                    continue
+                key = (int(s["slot"]), int(s["ch"]))
+                current = self._link_rules.get(key)
+                if current is None:
+                    raise RuntimeError(f"channel {key[0]}:{key[1]} has no reference link")
+                reference, _ = current
+                offset = float(s["offset"])
+                self._link_rules[key] = (reference, offset)
+                ref_val = requested_values.get(reference)
+                if ref_val is None:
+                    ref_val = float(self._get_channel_state(reference[0], reference[1]).get("vset", 0.0))
+                target = ref_val + offset
+                prior = requested_values.get(key)
+                if prior is not None and abs(prior - target) > 1e-6:
+                    raise RuntimeError(f"conflicting bulk request for {key[0]}:{key[1]}")
+                requested_values[key] = target
+            targets = self._build_linked_targets(requested_values=requested_values)
+            self._validate_vset_targets_in_range(targets)
+            initiator = keys[0]
+            self._validate_linked_power_consistency(initiator=initiator, affected=set(targets.keys()))
+            ramp_resync = self._ensure_group_ramps_synced(set(targets.keys()))
+            pdown_synced = self._sync_link_pdown(set(targets.keys()), adopt_from=initiator, strict=False)
+            ramping = self._group_ramping_channels(set(targets.keys()))
+            self._execute_vset_plan(targets)
+        except Exception:
+            for k, rule in snapshot.items():
+                if rule is None:
+                    self._link_rules.pop(k, None)
+                else:
+                    self._link_rules[k] = rule
+            raise
+        return {
+            "ramp_resync": ramp_resync,
+            "ramping": ramping,
+            "pdown_synced": pdown_synced,
+            "targets": {f"{s}:{c}": float(v) for (s, c), v in targets.items()},
+        }
+
     def apply_linked_power(self, slot: int, channel: int, enabled: bool) -> None:
         key = (int(slot), int(channel))
         self._set_channel_power(key[0], key[1], bool(enabled))
