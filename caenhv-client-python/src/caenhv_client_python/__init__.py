@@ -356,9 +356,14 @@ def send_command(
         raise RuntimeError(str(exc)) from exc
 
 
-def get_channel(slot: int, ch: int, **kwargs) -> dict:
-    """Return the remote channel's readings and settings."""
-    return send_command({"cmd": "get", "slot": int(slot), "ch": int(ch)}, **kwargs)["values"]
+def get_channel(slot: int, ch: int, fresh: bool = False, **kwargs) -> dict:
+    """Return the remote channel's readings and settings.
+
+    The result carries a `ts` (device sample time) when the server read cache
+    is active; compare it across polls to tell a new sample from a repeat.
+    Pass fresh=True to bypass the cache and force a live crate read.
+    """
+    return send_command({"cmd": "get", "slot": int(slot), "ch": int(ch), "fresh": bool(fresh)}, **kwargs)["values"]
 
 
 def get_link(slot: int, ch: int, **kwargs) -> dict:
@@ -375,17 +380,19 @@ def get_offset(slot: int, ch: int, **kwargs) -> float:
     return get_link(slot, ch, **kwargs)["offset"]
 
 
-def get_many(channels, include_link: bool = False, **kwargs) -> list:
+def get_many(channels, include_link: bool = False, fresh: bool = False, **kwargs) -> list:
     """Read many channels in one round-trip.
 
     channels: iterable of (slot, ch). Returns a list aligned with channels;
-    each item is {vmon, vset, imon, power, status[, link]} or {'error': ...}
-    for a channel that could not be read.
+    each item is {vmon, vset, imon, power, status, ts[, link]} or {'error': ...}
+    for a channel that could not be read. `ts` is the device sample time (when
+    the server cache is active). Pass fresh=True to bypass the cache.
     """
     payload = {
         "cmd": "get_many",
         "channels": [[int(s), int(c)] for s, c in channels],
         "include_link": bool(include_link),
+        "fresh": bool(fresh),
     }
     return send_command(payload, **kwargs)["values"]
 
@@ -581,12 +588,15 @@ class RemoteClient:
         return send_command(cmd, host=self.host, port=self.port, token=self.token, timeout=self.timeout)
 
     # --- reads ---
-    def get_channel(self, slot: int, ch: int) -> dict:
-        return self.send_command({"cmd": "get", "slot": int(slot), "ch": int(ch)})["values"]
+    def get_channel(self, slot: int, ch: int, fresh: bool = False) -> dict:
+        return self.send_command(
+            {"cmd": "get", "slot": int(slot), "ch": int(ch), "fresh": bool(fresh)}
+        )["values"]
 
-    def get_many(self, channels, include_link: bool = False) -> list:
+    def get_many(self, channels, include_link: bool = False, fresh: bool = False) -> list:
         return self.send_command({
             "cmd": "get_many",
+            "fresh": bool(fresh),
             "channels": [[int(s), int(c)] for s, c in channels],
             "include_link": bool(include_link),
         })["values"]

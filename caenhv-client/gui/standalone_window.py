@@ -119,9 +119,18 @@ class StandaloneMainWindow(MainWindow):
         name = str(cmd.get("cmd", "")).strip().lower()
         if name == "get":
             slot, channel = int(cmd["slot"]), int(cmd["ch"])
-            values = dict(self._worker.fetch_channel_settings(slot, channel))
-            snap = self._worker.refresh_channel_snapshot(slot, channel)
+            if cmd.get("fresh"):
+                self._worker.set_fresh_reads(True)
+            try:
+                values = dict(self._worker.fetch_channel_settings(slot, channel))
+                snap = self._worker.refresh_channel_snapshot(slot, channel)
+            finally:
+                if cmd.get("fresh"):
+                    self._worker.set_fresh_reads(False)
             values.update(snap)
+            ts = self._worker._bridge_last_ts()
+            if ts is not None:
+                values["ts"] = ts
             self.on_channel_updated(slot, channel, snap)
             return {"status": "ok", "slot": slot, "ch": channel, "values": values}
         if name == "get_link":
@@ -130,16 +139,23 @@ class StandaloneMainWindow(MainWindow):
         if name == "get_many":
             channels = cmd.get("channels") or []
             include_link = bool(cmd.get("include_link", False))
+            fresh = bool(cmd.get("fresh"))
+            if fresh:
+                self._worker.set_fresh_reads(True)
             values: list = []
-            for pair in channels:
-                try:
-                    slot, channel = int(pair[0]), int(pair[1])
-                    entry = self._worker.read_channel_brief(slot, channel)
-                    if include_link:
-                        entry["link"] = self._worker.link_info(slot, channel)
-                    values.append(entry)
-                except Exception as exc:  # one bad channel must not blank the rest
-                    values.append({"error": str(exc)})
+            try:
+                for pair in channels:
+                    try:
+                        slot, channel = int(pair[0]), int(pair[1])
+                        entry = self._worker.read_channel_brief(slot, channel)
+                        if include_link:
+                            entry["link"] = self._worker.link_info(slot, channel)
+                        values.append(entry)
+                    except Exception as exc:  # one bad channel must not blank the rest
+                        values.append({"error": str(exc)})
+            finally:
+                if fresh:
+                    self._worker.set_fresh_reads(False)
             return {"status": "ok", "values": values}
         if name == "get_links":
             return {

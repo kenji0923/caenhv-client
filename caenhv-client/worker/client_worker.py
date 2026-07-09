@@ -473,7 +473,25 @@ class ClientWorker:
             payload["errors"] = errors
         if not payload:
             raise RuntimeError(f"channel {slot}:{channel} could not be read")
+        ts = self._bridge_last_ts()
+        if ts is not None:
+            payload["ts"] = ts
         return payload
+
+    def _bridge_last_ts(self) -> float | None:
+        """Sample timestamp of the last read from the server cache, if exposed."""
+        try:
+            meta = self._bridge.last_meta()  # type: ignore[union-attr]
+            return meta.get("ts")
+        except Exception:
+            return None
+
+    def set_fresh_reads(self, enabled: bool) -> None:
+        """Ask the bridge to bypass the server read cache for subsequent reads."""
+        try:
+            self._bridge.set_fresh(bool(enabled))  # type: ignore[union-attr]
+        except Exception:
+            pass
 
     def get_link_reference(self, slot: int, channel: int) -> tuple[int, int] | None:
         key = (int(slot), int(channel))
