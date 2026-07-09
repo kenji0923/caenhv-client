@@ -318,7 +318,16 @@ def _read_reply(sock, timeout: float) -> dict:
         )
     reply = json.loads(buffer.split(b"\n", 1)[0].decode("utf-8"))
     if reply.get("status") != "ok":
-        raise RuntimeError(reply.get("error", "remote command failed"))
+        message = reply.get("error", "remote command failed")
+        channel = reply.get("channel")
+        if channel is not None:
+            # Machine-addressable offending channel ("slot:ch"): fold it into
+            # the message and expose it as a .channel attribute for callers.
+            message = f"{message} (channel {channel})"
+        error = RuntimeError(message)
+        if channel is not None:
+            error.channel = channel
+        raise error
     return reply
 
 
@@ -499,6 +508,15 @@ class RemoteClient:
     (lower overhead for many requests); it reconnects automatically on a
     transport error. Use one instance per thread (one outstanding request at
     a time), and ``close()`` it when done (or use it as a context manager).
+
+    For fast polling (e.g. a ~10 Hz slave loop) use ``persistent=True`` with a
+    lower ``timeout``: the held socket avoids a connect per poll and the
+    timeout bounds how long a stalled GUI blocks the loop. In persistent mode
+    every call (including ``get_many``) reuses the one socket and only
+    reconnects after a dropped connection.
+
+    A reply that names an offending channel raises ``RuntimeError`` with a
+    ``.channel`` attribute ("slot:ch") in addition to the message text.
     """
 
     def __init__(

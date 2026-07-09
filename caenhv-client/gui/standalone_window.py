@@ -18,9 +18,9 @@ except Exception:
     from local_server import GuiLocalServer, GuiTcpShowServer
 
 try:
-    from ..worker.client_worker import ClientWorker
+    from ..worker.client_worker import ChannelError, ClientWorker
 except Exception:
-    from worker.client_worker import ClientWorker
+    from worker.client_worker import ChannelError, ClientWorker
 
 
 class StandaloneMainWindow(MainWindow):
@@ -166,7 +166,12 @@ class StandaloneMainWindow(MainWindow):
             sets = cmd.get("sets") or []
             if not isinstance(sets, list) or not sets:
                 return {"status": "error", "error": "set_linked_bulk requires a non-empty 'sets' list"}
-            result = self._worker.apply_linked_bulk(sets)
+            try:
+                result = self._worker.apply_linked_bulk(sets)
+            except ChannelError as exc:
+                # Machine-addressable offending channel; generic exceptions keep
+                # the plain {"status","error"} shape via the server's handler.
+                return {"status": "error", "error": str(exc), "channel": exc.channel}
             first = (int(sets[0]["slot"]), int(sets[0]["ch"]))
             self._log_move_notices(first[0], first[1], result)
             self._apply_cached_linked_widget_settings()

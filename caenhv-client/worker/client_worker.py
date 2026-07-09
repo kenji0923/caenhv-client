@@ -11,6 +11,20 @@ from types import ModuleType
 from typing import Any
 
 
+class ChannelError(RuntimeError):
+    """A worker error attributable to one channel.
+
+    Carries a machine-addressable ``channel`` ("slot:ch") so a remote caller
+    can act on the offending channel instead of parsing it out of the message.
+    """
+
+    def __init__(self, slot: int, channel: int, message: str) -> None:
+        self.slot = int(slot)
+        self.ch = int(channel)
+        self.channel = f"{self.slot}:{self.ch}"
+        super().__init__(message)
+
+
 class ClientWorker:
     """Plain Python worker/service for CAEN devman client operations.
 
@@ -429,20 +443,34 @@ class ClientWorker:
         }
 
     def read_channel_brief(self, slot: int, channel: int) -> dict[str, Any]:
-        """Essential monitoring fields for bulk reads (same names/signs as get)."""
+        """Essential monitoring fields for bulk reads (same names/signs as get).
+
+        A failed vset/power sub-read leaves its key absent and records the
+        reason under ``errors`` ({"vset": "<msg>"}), so a partial failure is
+        visible to the caller instead of silently missing. A failed core
+        snapshot (vmon/status) still raises, so the caller marks the whole
+        channel {"error": ...}.
+        """
         bridge = self._ensure_bridge()
         payload = self.refresh_channel_snapshot(int(slot), int(channel))  # vmon, imon, status
+        errors: dict[str, str] = {}
         try:
             raw = bridge.Device_get_ch_param(int(slot), [int(channel)], "V0Set")[0]
             payload["vset"] = self._to_ui_voltage(int(slot), "V0Set", raw)
-        except Exception:
-            pass
+        except Exception as exc:
+            errors["vset"] = str(exc)
+        last_exc: Exception | None = None
         for pw_name in ("Pw", "PW", "Pon"):
             try:
                 payload["power"] = bridge.Device_get_ch_param(int(slot), [int(channel)], pw_name)[0]
                 break
-            except Exception:
+            except Exception as exc:
+                last_exc = exc
                 continue
+        else:
+            errors["power"] = str(last_exc) if last_exc is not None else "power not readable"
+        if errors:
+            payload["errors"] = errors
         if not payload:
             raise RuntimeError(f"channel {slot}:{channel} could not be read")
         return payload
@@ -1055,8 +1083,9 @@ class ClientWorker:
                     work.append(source)
                     continue
                 if not math.isclose(float(old), source_v, rel_tol=0.0, abs_tol=1e-6):
-                    raise RuntimeError(
-                        f"conflicting linked targets for channel {source[0]}:{source[1]}"
+                    raise ChannelError(
+                        source[0], source[1],
+                        f"conflicting linked targets for channel {source[0]}:{source[1]}",
                     )
         return targets
 
@@ -1067,9 +1096,10 @@ class ClientWorker:
             lo = limits.get("vset_min")
             hi = limits.get("vset_max")
             if lo is not None and hi is not None and not (float(lo) <= target <= float(hi)):
-                raise RuntimeError(
+                raise ChannelError(
+                    slot, channel,
                     "resulted Vset out of range for "
-                    f"{slot}:{channel} (target={target:.6g}, range={float(lo):.6g}..{float(hi):.6g})"
+                    f"{slot}:{channel} (target={target:.6g}, range={float(lo):.6g}..{float(hi):.6g})",
                 )
             # Reject targets the hardware would clamp to SVMax; a silent
             # clamp changes the achieved difference between linked channels.
@@ -1077,9 +1107,10 @@ class ClientWorker:
             if svmax is not None:
                 backend_target = abs(float(self._to_backend_voltage(int(slot), "V0Set", target)))
                 if backend_target > float(svmax[0]) + 1e-6:
-                    raise RuntimeError(
+                    raise ChannelError(
+                        slot, channel,
                         "resulted Vset exceeds SVMax for "
-                        f"{slot}:{channel} (target={target:.6g}, svmax={float(svmax[0]):.6g})"
+                        f"{slot}:{channel} (target={target:.6g}, svmax={float(svmax[0]):.6g})",
                     )
 
     def _validate_linked_power_consistency(
@@ -1094,14 +1125,16 @@ class ClientWorker:
             state = self._get_channel_state(slot, channel)
             ch_on = self._to_bool(state.get("power", False))
             if init_on and not ch_on:
-                raise RuntimeError(
+                raise ChannelError(
+                    slot, channel,
                     f"linked queue rejected: initiator {initiator[0]}:{initiator[1]} is ON "
-                    f"but linked channel {slot}:{channel} is OFF"
+                    f"but linked channel {slot}:{channel} is OFF",
                 )
             if (not init_on) and ch_on:
-                raise RuntimeError(
+                raise ChannelError(
+                    slot, channel,
                     f"linked queue rejected: initiator {initiator[0]}:{initiator[1]} is OFF "
-                    f"but linked channel {slot}:{channel} is ON"
+                    f"but linked channel {slot}:{channel} is ON",
                 )
 
     def _set_channel_power(self, slot: int, channel: int, enabled: bool) -> None:
