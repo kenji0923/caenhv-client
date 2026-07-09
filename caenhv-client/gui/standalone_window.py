@@ -47,6 +47,11 @@ class StandaloneMainWindow(MainWindow):
         self._poll_timer = QtCore.QTimer(self)
         self._poll_timer.setInterval(1000)
         self._poll_timer.timeout.connect(self._slot_poll_tick)
+        # Remote setpoints are accepted (validated + adopted) synchronously
+        # and their crate writes run from this ordered FIFO, so the remote
+        # caller never waits for the hardware; see _queue_remote_hw.
+        self._remote_hw_queue: list[tuple[str, dict]] = []
+        self._remote_hw_busy = False
         self._worker = ClientWorker()
         self._wire_standalone_slots()
         self._load_connection_inputs()
@@ -192,36 +197,45 @@ class StandaloneMainWindow(MainWindow):
             }
         if name == "set_vset":
             slot, channel, value = int(cmd["slot"]), int(cmd["ch"]), float(cmd["value"])
-            result = self._worker.apply_linked_vset(slot, channel, value)
-            self._log_move_notices(slot, channel, result)
+            # Accept-then-apply: validate + adopt synchronously (invalid
+            # values error out right here), reply immediately, and run the
+            # crate writes from the ordered FIFO -- like a human typing into
+            # this GUI, the remote caller does not wait for the hardware.
+            plan = self._worker.prepare_linked_vset(slot, channel, value)
             self._apply_cached_linked_widget_settings()
-            self.on_channel_updated(slot, channel, self._worker.refresh_channel_snapshot(slot, channel))
-            self.append_response_log(f"remote set_vset slot={slot} ch={channel} value={value}")
-            return {"status": "ok"}
+            self.append_response_log(
+                f"remote set_vset slot={slot} ch={channel} value={value} (accepted, hw queued)"
+            )
+            self._queue_remote_hw(f"set_vset {slot}:{channel}={value}", plan)
+            return {"status": "ok", "queued_hw": True}
         if name == "set_offset":
             slot, channel, value = int(cmd["slot"]), int(cmd["ch"]), float(cmd["value"])
-            result = self._worker.apply_linked_offset(slot, channel, value)
-            self._log_move_notices(slot, channel, result)
+            plan = self._worker.prepare_linked_offset(slot, channel, value)
             self._apply_cached_linked_widget_settings()
-            self.append_response_log(f"remote set_offset slot={slot} ch={channel} value={value}")
-            return {"status": "ok"}
+            self.append_response_log(
+                f"remote set_offset slot={slot} ch={channel} value={value} (accepted, hw queued)"
+            )
+            self._queue_remote_hw(f"set_offset {slot}:{channel}={value}", plan)
+            return {"status": "ok", "queued_hw": True}
         if name == "set_linked_bulk":
             sets = cmd.get("sets") or []
             if not isinstance(sets, list) or not sets:
                 return {"status": "error", "error": "set_linked_bulk requires a non-empty 'sets' list"}
             try:
-                result = self._worker.apply_linked_bulk(sets)
+                plan = self._worker.prepare_linked_bulk(sets)
             except ChannelError as exc:
                 # Machine-addressable offending channel; generic exceptions keep
                 # the plain {"status","error"} shape via the server's handler.
                 return {"status": "error", "error": str(exc), "channel": exc.channel}
-            first = (int(sets[0]["slot"]), int(sets[0]["ch"]))
-            self._log_move_notices(first[0], first[1], result)
             self._apply_cached_linked_widget_settings()
-            for slot, channel in {(int(s["slot"]), int(s["ch"])) for s in sets}:
-                self.on_channel_updated(slot, channel, self._worker.refresh_channel_snapshot(slot, channel))
-            self.append_response_log(f"remote set_linked_bulk count={len(sets)}")
-            return {"status": "ok", "targets": result.get("targets", {})}
+            self.append_response_log(
+                f"remote set_linked_bulk count={len(sets)} (accepted, hw queued)"
+            )
+            self._queue_remote_hw(f"set_linked_bulk count={len(sets)}", plan)
+            targets = {
+                f"{s}:{c}": float(v) for (s, c), v in plan["targets"].items()
+            }
+            return {"status": "ok", "queued_hw": True, "targets": targets}
         if name == "set_power":
             slot, channel = int(cmd["slot"]), int(cmd["ch"])
             raw = cmd.get("on", cmd.get("value"))
@@ -438,6 +452,47 @@ class StandaloneMainWindow(MainWindow):
             self.append_response_log(
                 f"NOTE: server watchdog also protects groups registered by client '{client}': {summary}"
             )
+
+    def _queue_remote_hw(self, label: str, plan: dict) -> None:
+        """Enqueue the crate-write phase of an accepted remote setpoint.
+
+        Writes run strictly in acceptance order via chained zero-delay timers
+        on the GUI thread (the same thread the old synchronous path used);
+        the remote reply was already sent at accept time."""
+        self._remote_hw_queue.append((label, plan))
+        if not self._remote_hw_busy:
+            self._remote_hw_busy = True
+            QtCore.QTimer.singleShot(0, self._process_remote_hw_queue)
+
+    def _process_remote_hw_queue(self) -> None:
+        if not self._remote_hw_queue:
+            self._remote_hw_busy = False
+            return
+        label, plan = self._remote_hw_queue.pop(0)
+        initiator = plan.get("initiator") or (0, 0)
+        affected = sorted(plan.get("targets", {}).keys())
+        try:
+            result = self._worker.execute_prepared_plan(plan)
+        except Exception as exc:
+            # The worker reverted the adopted intent; re-sync widgets and
+            # snapshots to hardware reality so the failure is visible here
+            # and to polling slaves (their fields re-adopt the actual value;
+            # the error text lives in this log).
+            self.append_response_log(
+                f"ERROR: remote {label} hardware apply FAILED: {exc}"
+            )
+        else:
+            self._log_move_notices(int(initiator[0]), int(initiator[1]), result)
+            self.append_response_log(f"remote {label} hardware apply done")
+        self._apply_cached_linked_widget_settings()
+        for slot, channel in affected:
+            try:
+                self.on_channel_updated(
+                    slot, channel, self._worker.refresh_channel_snapshot(slot, channel)
+                )
+            except Exception:
+                pass
+        QtCore.QTimer.singleShot(0, self._process_remote_hw_queue)
 
     def _log_move_notices(self, slot: int, channel: int, result: dict | None) -> None:
         result = result or {}

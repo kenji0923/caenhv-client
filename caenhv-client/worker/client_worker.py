@@ -455,8 +455,14 @@ class ClientWorker:
         payload = self.refresh_channel_snapshot(int(slot), int(channel))  # vmon, imon, status
         errors: dict[str, str] = {}
         try:
-            raw = bridge.Device_get_ch_param(int(slot), [int(channel)], "V0Set")[0]
-            payload["vset"] = self._to_ui_voltage(int(slot), "V0Set", raw)
+            # Intent-side setpoint: the GUI's accepted value (adopted at
+            # prepare time, updated after writes, lazily seeded from hardware
+            # on first read). The master's front-panel state is the sync
+            # source of truth for setpoints; serving it here also removes one
+            # crate transaction per channel per bulk-read round.
+            payload["vset"] = float(
+                self._get_channel_state(int(slot), int(channel)).get("vset", 0.0)
+            )
         except Exception as exc:
             errors["vset"] = str(exc)
         last_exc: Exception | None = None
@@ -1188,13 +1194,21 @@ class ClientWorker:
             self._set_channel_power(slot, channel, bool(enabled))
         return info
 
-    def _execute_vset_plan(self, targets: dict[tuple[int, int], float]) -> None:
-        states: dict[tuple[int, int], dict[str, Any]] = {
-            key: self._get_channel_state(key[0], key[1]) for key in targets
-        }
-        pre_vsets: dict[tuple[int, int], float] = {
-            key: float(state.get("vset", 0.0)) for key, state in states.items()
-        }
+    def _execute_vset_plan(
+        self,
+        targets: dict[tuple[int, int], float],
+        pre_vsets: dict[tuple[int, int], float] | None = None,
+    ) -> None:
+        # pre_vsets: the true pre-write setpoints. Callers that already
+        # adopted the targets into _channel_state (prepare/execute split) must
+        # pass them in -- the write ORDERING below is derived from the shift
+        # direction relative to the pre-write values, and the cached state no
+        # longer holds them.
+        if pre_vsets is None:
+            pre_vsets = {
+                key: float(self._get_channel_state(key[0], key[1]).get("vset", 0.0))
+                for key in targets
+            }
 
         # Build precedence constraints per linked pair from requested shift
         # direction and offset sign:
@@ -1208,7 +1222,7 @@ class ClientWorker:
             if source not in targets or reference not in targets:
                 continue
 
-            src_now = float(states[source].get("vset", 0.0))
+            src_now = float(pre_vsets[source])
             src_target = float(targets[source])
             shift = float(src_target - src_now)
             off = float(offset)
@@ -1495,40 +1509,71 @@ class ClientWorker:
                 ramping.append((int(slot), int(channel)))
         return ramping
 
-    def apply_linked_vset(self, slot: int, channel: int, requested_vset: float) -> dict[str, Any]:
+    # --- prepare / execute split ------------------------------------------
+    # A linked setpoint change has two phases with very different costs:
+    # validation + intent adoption (local, ~ms) and the crate writes
+    # (ramp/PDwn sync + ordered V0Set moves, ~seconds). prepare_* runs the
+    # first phase and adopts the targets into _channel_state -- from that
+    # moment snapshots/bulk reads report the accepted setpoint (the GUI is
+    # the master; hardware attainment is the monitor plane). The GUI window
+    # replies to remote setters right after prepare and runs
+    # execute_prepared_plan from a deferred FIFO. apply_linked_* remain as
+    # the synchronous composition for in-GUI edits.
+
+    def _restore_link_rules(self, snapshot: dict[tuple[int, int], Any]) -> None:
+        for key, rule in snapshot.items():
+            if rule is None:
+                self._link_rules.pop(key, None)
+            else:
+                self._link_rules[key] = rule
+
+    def _adopt_plan(
+        self,
+        targets: dict[tuple[int, int], float],
+        *,
+        initiator: tuple[int, int],
+        rules_snapshot: dict[tuple[int, int], Any],
+    ) -> dict[str, Any]:
+        """Adopt validated targets as the setpoint intent; return the plan
+        for execute_prepared_plan (which reverts the adoption on failure)."""
+        pre_vsets: dict[tuple[int, int], float] = {}
+        for key in targets:
+            state = self._get_channel_state(key[0], key[1])
+            pre_vsets[key] = float(state.get("vset", 0.0))
+            state["vset"] = float(targets[key])
+            self._channel_state[key] = state
+        return {
+            "targets": dict(targets),
+            "initiator": (int(initiator[0]), int(initiator[1])),
+            "rules_snapshot": dict(rules_snapshot),
+            "pre_vsets": pre_vsets,
+        }
+
+    def prepare_linked_vset(self, slot: int, channel: int, requested_vset: float) -> dict[str, Any]:
+        """Validate + adopt a linked vset request without touching hardware."""
         key = (int(slot), int(channel))
-        current_rule = self._link_rules.get(key)
-        previous_rule = current_rule
-        updated_rule = False
-        if current_rule is not None:
-            reference, _offset = current_rule
+        rules_snapshot: dict[tuple[int, int], Any] = {key: self._link_rules.get(key)}
+        if rules_snapshot[key] is not None:
+            reference, _offset = rules_snapshot[key]
             ref_state = self._get_channel_state(reference[0], reference[1])
             ref_vset = float(ref_state.get("vset", 0.0))
             self._link_rules[key] = (reference, float(requested_vset) - ref_vset)
-            updated_rule = True
         try:
             targets = self._build_linked_targets(requested_values={key: float(requested_vset)})
             self._validate_vset_targets_in_range(targets)
             self._validate_linked_power_consistency(initiator=key, affected=set(targets.keys()))
-            ramp_resync = self._ensure_group_ramps_synced(set(targets.keys()))
-            pdown_synced = self._sync_link_pdown(set(targets.keys()), adopt_from=key, strict=False)
-            ramping = self._group_ramping_channels(set(targets.keys()))
-            self._execute_vset_plan(targets)
         except Exception:
-            if updated_rule:
-                if previous_rule is None:
-                    self._link_rules.pop(key, None)
-                else:
-                    self._link_rules[key] = previous_rule
+            self._restore_link_rules(rules_snapshot)
             raise
-        return {"ramp_resync": ramp_resync, "ramping": ramping, "pdown_synced": pdown_synced}
+        return self._adopt_plan(targets, initiator=key, rules_snapshot=rules_snapshot)
 
-    def apply_linked_offset(self, slot: int, channel: int, offset: float) -> dict[str, Any]:
+    def prepare_linked_offset(self, slot: int, channel: int, offset: float) -> dict[str, Any]:
+        """Validate + adopt a linked offset request without touching hardware."""
         key = (int(slot), int(channel))
         current = self._link_rules.get(key)
         if current is None:
             raise RuntimeError(f"channel {slot}:{channel} has no reference link")
-        previous_rule = current
+        rules_snapshot: dict[tuple[int, int], Any] = {key: current}
         reference, _ = current
         self._link_rules[key] = (reference, float(offset))
         try:
@@ -1537,17 +1582,13 @@ class ClientWorker:
             targets = self._build_linked_targets(requested_values={key: target_vset})
             self._validate_vset_targets_in_range(targets)
             self._validate_linked_power_consistency(initiator=key, affected=set(targets.keys()))
-            ramp_resync = self._ensure_group_ramps_synced(set(targets.keys()))
-            pdown_synced = self._sync_link_pdown(set(targets.keys()), adopt_from=key, strict=False)
-            ramping = self._group_ramping_channels(set(targets.keys()))
-            self._execute_vset_plan(targets)
         except Exception:
-            self._link_rules[key] = previous_rule
+            self._restore_link_rules(rules_snapshot)
             raise
-        return {"ramp_resync": ramp_resync, "ramping": ramping, "pdown_synced": pdown_synced}
+        return self._adopt_plan(targets, initiator=key, rules_snapshot=rules_snapshot)
 
-    def apply_linked_bulk(self, sets: list[dict]) -> dict[str, Any]:
-        """Apply several linked vset/offset changes atomically.
+    def prepare_linked_bulk(self, sets: list[dict]) -> dict[str, Any]:
+        """Validate + adopt several linked vset/offset changes atomically.
 
         Each entry is {"slot", "ch", "vset": float} (a master setpoint) or
         {"slot", "ch", "offset": float} (relative level of a linked channel).
@@ -1558,7 +1599,7 @@ class ClientWorker:
         if not sets:
             raise ValueError("apply_linked_bulk requires at least one entry")
         keys = [(int(s["slot"]), int(s["ch"])) for s in sets]
-        snapshot = {k: self._link_rules.get(k) for k in keys}
+        rules_snapshot = {k: self._link_rules.get(k) for k in keys}
         requested_values: dict[tuple[int, int], float] = {}
         try:
             # vset entries are direct master requests.
@@ -1594,16 +1635,28 @@ class ClientWorker:
             self._validate_vset_targets_in_range(targets)
             initiator = keys[0]
             self._validate_linked_power_consistency(initiator=initiator, affected=set(targets.keys()))
-            ramp_resync = self._ensure_group_ramps_synced(set(targets.keys()))
-            pdown_synced = self._sync_link_pdown(set(targets.keys()), adopt_from=initiator, strict=False)
-            ramping = self._group_ramping_channels(set(targets.keys()))
-            self._execute_vset_plan(targets)
         except Exception:
-            for k, rule in snapshot.items():
-                if rule is None:
-                    self._link_rules.pop(k, None)
-                else:
-                    self._link_rules[k] = rule
+            self._restore_link_rules(rules_snapshot)
+            raise
+        return self._adopt_plan(targets, initiator=initiator, rules_snapshot=rules_snapshot)
+
+    def execute_prepared_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
+        """Crate-write phase of a prepared plan: ramp/PDwn sync + ordered
+        V0Set writes. On failure, restore the link rules and drop the adopted
+        intent (the next read refetches hardware truth), then re-raise."""
+        targets: dict[tuple[int, int], float] = plan["targets"]
+        initiator: tuple[int, int] = plan["initiator"]
+        try:
+            ramp_resync = self._ensure_group_ramps_synced(set(targets.keys()))
+            pdown_synced = self._sync_link_pdown(
+                set(targets.keys()), adopt_from=initiator, strict=False
+            )
+            ramping = self._group_ramping_channels(set(targets.keys()))
+            self._execute_vset_plan(targets, pre_vsets=dict(plan["pre_vsets"]))
+        except Exception:
+            self._restore_link_rules(plan["rules_snapshot"])
+            for key in targets:
+                self._channel_state.pop(key, None)
             raise
         return {
             "ramp_resync": ramp_resync,
@@ -1611,6 +1664,17 @@ class ClientWorker:
             "pdown_synced": pdown_synced,
             "targets": {f"{s}:{c}": float(v) for (s, c), v in targets.items()},
         }
+
+    def apply_linked_vset(self, slot: int, channel: int, requested_vset: float) -> dict[str, Any]:
+        return self.execute_prepared_plan(self.prepare_linked_vset(slot, channel, requested_vset))
+
+    def apply_linked_offset(self, slot: int, channel: int, offset: float) -> dict[str, Any]:
+        return self.execute_prepared_plan(self.prepare_linked_offset(slot, channel, offset))
+
+    def apply_linked_bulk(self, sets: list[dict]) -> dict[str, Any]:
+        """Apply several linked vset/offset changes atomically (see
+        prepare_linked_bulk for the entry format and seeding rules)."""
+        return self.execute_prepared_plan(self.prepare_linked_bulk(sets))
 
     def apply_linked_power(self, slot: int, channel: int, enabled: bool) -> None:
         key = (int(slot), int(channel))
