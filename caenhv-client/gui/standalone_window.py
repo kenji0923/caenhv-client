@@ -36,6 +36,14 @@ class StandaloneMainWindow(MainWindow):
         self._settings_check_running = False
         self._last_settings_check_monotonic = 0.0
         self._last_ui_activity_monotonic = time.monotonic()
+        # Freshness stamps shown in the Channel setting title bar.
+        self._launch_walltime = time.time()
+        # Wall-clock of the last new (non-duplicated) monitor sample; 0 = none yet.
+        self._last_monitor_ts = 0.0
+        # Wall-clock of the last settings check; seeded to launch time so the
+        # title is meaningful even when the periodic check is disabled.
+        self._last_settings_check_walltime = self._launch_walltime
+        self._channel_setting_base_title = ""
         self._poll_timer = QtCore.QTimer(self)
         self._poll_timer.setInterval(1000)
         self._poll_timer.timeout.connect(self._slot_poll_tick)
@@ -64,6 +72,25 @@ class StandaloneMainWindow(MainWindow):
         app = QtWidgets.QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
+        if hasattr(self, "groupBoxChannelSetting"):
+            self._channel_setting_base_title = self.groupBoxChannelSetting.title()
+            self._update_channel_setting_title()
+
+    def _update_channel_setting_title(self) -> None:
+        """Show last new-monitor and last settings-check times in the group title."""
+        if not hasattr(self, "groupBoxChannelSetting"):
+            return
+
+        def _fmt(ts: float) -> str:
+            if not ts:
+                return "—"  # em dash: no sample yet
+            return time.strftime("%H:%M:%S", time.localtime(ts))
+
+        self.groupBoxChannelSetting.setTitle(
+            f"{self._channel_setting_base_title}"
+            f"      Monitor: {_fmt(self._last_monitor_ts)}"
+            f"      Settings: {_fmt(self._last_settings_check_walltime)}"
+        )
 
     def _load_connection_inputs(self) -> None:
         host = str(self._settings.value("connection/server_host", "127.0.0.1"))
@@ -316,11 +343,20 @@ class StandaloneMainWindow(MainWindow):
     @QtCore.pyqtSlot()
     def _slot_poll_tick(self) -> None:
         try:
+            newest_ts = self._last_monitor_ts
             for slot, ch in list(self._channel_widgets.keys()):
                 payload = self._worker.refresh_channel_snapshot(int(slot), int(ch))
                 self.on_channel_updated(int(slot), int(ch), payload)
+                ts = payload.get("ts")
+                if ts is not None and ts > newest_ts:
+                    newest_ts = float(ts)
                 if "status" in payload:
                     self._handle_trip_check(int(slot), int(ch), payload["status"])
+            # Only advance on a genuinely new sample, so the stamp reflects the
+            # last non-duplicated readback rather than every (possibly cached) poll.
+            if newest_ts > self._last_monitor_ts:
+                self._last_monitor_ts = newest_ts
+                self._update_channel_setting_title()
             self._renew_link_lease()
             self._maybe_run_periodic_settings_check()
         except Exception as exc:
@@ -472,7 +508,9 @@ class StandaloneMainWindow(MainWindow):
             self._run_periodic_settings_check_once()
         finally:
             self._last_settings_check_monotonic = time.monotonic()
+            self._last_settings_check_walltime = time.time()
             self._settings_check_running = False
+            self._update_channel_setting_title()
 
     def _float_differs(self, a: Any, b: Any, *, atol: float = 1e-9) -> bool:
         try:

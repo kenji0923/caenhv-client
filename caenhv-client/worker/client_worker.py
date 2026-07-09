@@ -1393,6 +1393,11 @@ class ClientWorker:
             state = dict(self._channel_state.get(key) or {})
             state["status"] = payload["status"]
             self._channel_state[key] = state
+        # Sample time of the underlying device read (shared across cached reads
+        # between poll cycles); lets the GUI show when the last new sample landed.
+        ts = self._bridge_last_ts()
+        if ts is not None:
+            payload["ts"] = ts
         return payload
 
     def fetch_channel_settings(self, slot: int, channel: int) -> dict[str, Any]:
