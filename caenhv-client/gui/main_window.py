@@ -53,6 +53,7 @@ class MainWindow(QtWidgets.QWidget):
         uic.loadUi(str(self._main_ui), self)
 
         self._channel_widgets: dict[tuple[int, int], ChannelWidget] = {}
+        self._aligned_col_widths: dict[str, int] = {}
         self._connected = False
         self._ui_settings = self._create_settings("caenhv_client_ui")
         self._active_client_name = ""
@@ -412,6 +413,10 @@ class MainWindow(QtWidgets.QWidget):
             widget.deleteLater()
             removed = True
         if removed:
+            # Widths may shrink once a wide row (e.g. slot2:ch11) is gone; force
+            # a recompute since the cached target could now be too wide.
+            self._aligned_col_widths = {}
+            self._align_channel_widget_columns()
             self._save_channel_ui_state()
 
     @QtCore.pyqtSlot(int, int, bool)
@@ -567,6 +572,26 @@ class MainWindow(QtWidgets.QWidget):
         widget = self._channel_widgets.get(key)
         if widget is not None:
             widget.update_display(payload)
+            self._align_channel_widget_columns()
+
+    def _align_channel_widget_columns(self) -> None:
+        """Give same-type labels (slotX:chY, Vmon, Imon) a shared width across
+        all channel rows so their columns line up. Adaptive: the width is the
+        max any row currently needs; re-applied only when it changes, so this is
+        cheap to call on every value update."""
+        widgets = list(self._channel_widgets.values())
+        if not widgets:
+            return
+        target: dict[str, int] = {}
+        for widget in widgets:
+            for name, width in widget.natural_label_widths().items():
+                if width > target.get(name, 0):
+                    target[name] = width
+        if target == self._aligned_col_widths:
+            return
+        self._aligned_col_widths = target
+        for widget in widgets:
+            widget.apply_aligned_label_widths(target)
 
     def ensure_channel_widget(self, slot: int, channel: int) -> ChannelWidget:
         key = (slot, channel)
@@ -580,6 +605,7 @@ class MainWindow(QtWidgets.QWidget):
         saved_visible = self._saved_verbose_by_channel.get(self._channel_key(slot, channel))
         if saved_visible is not None:
             widget.set_verbose_visible(bool(saved_visible))
+        self._align_channel_widget_columns()
         return widget
 
     def apply_link_ramp_values(

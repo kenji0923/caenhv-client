@@ -97,6 +97,29 @@ class ChannelWidget(QtWidgets.QWidget):
         self.labelImon.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         self._apply_status_style(None)
 
+    # Labels whose widths are aligned across all channel rows so their columns
+    # line up regardless of per-channel content (slotX:chY, Vmon, Imon).
+    _ALIGN_LABELS = ("labelResourceName", "labelVmon", "labelImon")
+
+    def natural_label_widths(self) -> dict[str, int]:
+        """Content width each aligned label needs, independent of any width
+        already forced on it (measured from the text, so it does not feed back
+        on a previously applied fixed width)."""
+        widths: dict[str, int] = {}
+        for name in self._ALIGN_LABELS:
+            label = getattr(self, name)
+            fm = label.fontMetrics()
+            left, _, right, _ = label.getContentsMargins()
+            widths[name] = fm.horizontalAdvance(label.text()) + left + right + 6
+        return widths
+
+    def apply_aligned_label_widths(self, widths: dict[str, int]) -> None:
+        """Pin each aligned label to a shared width so columns line up."""
+        for name, width in widths.items():
+            label = getattr(self, name)
+            label.setMinimumWidth(int(width))
+            label.setMaximumWidth(int(width))
+
     # Electrical fault bits: OVC, OVV, UNV, external/internal trip, MAXV, ILOCK.
     _STATUS_FAULT_MASK = (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 11)
     _STATUS_ON_BIT = 1 << 0
